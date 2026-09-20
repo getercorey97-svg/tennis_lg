@@ -13,12 +13,10 @@ def run_walk_forward_backtest():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Check if Historical_Forecasts has records; if empty, seed a demonstration audit
     c.execute("SELECT COUNT(*) FROM Historical_Forecasts;")
     count = c.fetchone()[0]
     
     if count == 0:
-        print("[BACKTEST] Historical_Forecasts is empty. Seeding benchmark historical audit...")
         c.execute("""
         INSERT OR IGNORE INTO Historical_Forecasts VALUES
         ('MATCH_ATP_DEMO_01', 'ATP_US_OPEN', 'ATP', 'Jannik Sinner', 'Carlos Alcaraz', 0.514, 0.486, 'Jannik Sinner', 48, 0, 0.0215, datetime('now')),
@@ -60,4 +58,4 @@ def run_walk_forward_backtest():
     print("=======================================================\n")
 
 if __name__ == "__main__":
-    run_walk_forward_backtest.py() if 'run_walk_forward_backtest' in globals() else run_walk_forward_backtest()
+    run_walk_forward_backtest()
