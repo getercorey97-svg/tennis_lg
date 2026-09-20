@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Pre-Match Monte Carlo Prediction Pipeline
-Simulates outcomes exclusively for verified fixtures in Daily_Card.
+tennis_lg: Pre-Match Forecast Engine
+Clears outdated board predictions and generates fresh Monte Carlo runs for active fixtures.
 """
 
 import sqlite3
@@ -18,13 +18,16 @@ def execute():
     fixtures = [dict(row) for row in c.fetchall()]
 
     if not fixtures:
-        print("[PIPELINE] No active fixtures scheduled on the board today.")
+        print("[PIPELINE] No active fixtures scheduled on the board.")
         conn.close()
         return
 
-    print(f"[PIPELINE] Simulating {len(fixtures)} real fixtures from Daily_Card...")
+    # Clear outdated model forecasts so the board displays only current games
+    c.execute("DELETE FROM Model_Forecasts;")
+    
+    print(f"[PIPELINE] Generating predictions for {len(fixtures)} live fixtures...")
     for fix in fixtures:
-        forecast = run_monte_carlo(fix, iterations=3500)
+        forecast = run_monte_carlo(fix, iterations=2500)
         c.execute("""
             INSERT OR REPLACE INTO Model_Forecasts (
                 match_id, tournament_id, tour, player_a, player_b,
@@ -40,11 +43,10 @@ def execute():
             forecast['v_thermo'], forecast['v_bio'], forecast['v_variance'],
             forecast['net_edge'], forecast['created_at']
         ))
-        print(f"  • Forecasted: {forecast['player_a']} ({forecast['prob_a_win']*100:.1f}%) vs {forecast['player_b']} ({forecast['prob_b_win']*100:.1f}%)")
 
     conn.commit()
     conn.close()
-    print("[PIPELINE] All real slate simulations completed.")
+    print("[PIPELINE] Current slate successfully populated.")
 
 if __name__ == "__main__":
     execute()
