@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Mobile Web Dashboard & Autonomous 24/7 Engine
-Optimized for Samsung Galaxy S26 Ultra AMOLED Display.
+tennis_lg: Full Operations Hub
+Features:
+- Live Slate with Instant Player/Tournament Search
+- Direct FanDuel Wager Logger & P/L Tracker
+- Historical Post-Mortem Audit Ledger (Hits, Misses, Brier Scores, Beta Drift)
+- 24/7 Autonomous Background Worker
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 import asyncio
@@ -20,30 +24,59 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+def init_betting_table():
+    conn = get_db()
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS Betting_Logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id TEXT,
+        tour TEXT,
+        selection TEXT,
+        wager_type TEXT,
+        odds INTEGER,
+        units REAL,
+        status TEXT DEFAULT 'PENDING',
+        actual_winner TEXT,
+        payout_units REAL DEFAULT 0.0,
+        logged_at TEXT
+    );
+    """)
+    conn.commit()
+    conn.close()
+
 async def autonomous_engine_cycle(interval_minutes: int = 15):
-    """24/7 Autonomous execution loop: scrape -> simulate -> audit."""
-    await asyncio.sleep(5)  # Initial grace period on boot
+    await asyncio.sleep(5)
     while True:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[AUTONOMOUS CYCLE START] {now_str}")
         try:
-            # 1. Pull active matches
             subprocess.run(["python3", "scraper.py"], check=False)
-            
-            # 2. Compute pre-match Monte Carlo forecasts
             subprocess.run(["python3", "run_pipeline.py"], check=False)
-            
-            # 3. Ingest finished results and update beta weights
             subprocess.run(["python3", "post_mortem.py"], check=False)
             
+            # Auto-settle pending bets against newly audited historical matches
+            conn = get_db()
+            c = conn.cursor()
+            c.execute("""
+                SELECT b.id, b.selection, b.odds, b.units, h.actual_winner
+                FROM Betting_Logs b
+                JOIN Historical_Forecasts h ON b.match_id = h.match_id
+                WHERE b.status = 'PENDING';
+            """)
+            settle_queue = c.fetchall()
+            for b_id, sel, odds, units, actual_winner in settle_queue:
+                if sel == actual_winner:
+                    payout = (units * (odds / 100.0)) if odds > 0 else (units * (100.0 / abs(odds)))
+                    c.execute("UPDATE Betting_Logs SET status = 'WON', actual_winner = ?, payout_units = ? WHERE id = ?;", (actual_winner, round(payout, 2), b_id))
+                else:
+                    c.execute("UPDATE Betting_Logs SET status = 'LOST', actual_winner = ?, payout_units = ? WHERE id = ?;", (actual_winner, -units, b_id))
+            conn.commit()
+            conn.close()
         except Exception as e:
-            print(f"[AUTONOMOUS CYCLE ERROR] {e}")
-            
-        print(f"[AUTONOMOUS CYCLE FINISHED] Sleeping for {interval_minutes} minutes...\n")
+            print(f"[BACKGROUND WORKER ERROR] {e}")
         await asyncio.sleep(interval_minutes * 60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_betting_table()
     worker_task = asyncio.create_task(autonomous_engine_cycle(interval_minutes=15))
     yield
     worker_task.cancel()
@@ -51,57 +84,82 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="tennis_lg Operational Hub", lifespan=lifespan)
 
 @app.get("/health")
-def health_check():
-    """Lightweight endpoint for uptime keep-alive pings."""
-    return {"status": "healthy", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+def health():
+    return {"status": "healthy", "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 @app.post("/api/sync")
 def manual_sync():
-    """Instant trigger when user opens or refreshes app."""
     try:
         subprocess.run(["python3", "scraper.py"], check=False)
         subprocess.run(["python3", "run_pipeline.py"], check=False)
         subprocess.run(["python3", "post_mortem.py"], check=False)
-        return JSONResponse({"status": "completed"})
+        return JSONResponse({"status": "synced"})
     except Exception as e:
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
-@app.post("/api/backtest/run")
-def run_backtest():
-    if not os.path.exists(DB_NAME):
-        raise HTTPException(status_code=400, detail="Database not initialized.")
+@app.post("/api/bet/log")
+async def log_bet(request: Request):
+    data = await request.json()
+    match_id = data.get("match_id")
+    tour = data.get("tour")
+    selection = data.get("selection")
+    wager_type = data.get("wager_type", "Moneyline")
+    odds = int(data.get("odds", -110))
+    units = float(data.get("units", 1.0))
     
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM Historical_Forecasts;")
-    count = c.fetchone()[0]
+    c.execute("""
+        INSERT INTO Betting_Logs (match_id, tour, selection, wager_type, odds, units, logged_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+    """, (match_id, tour, selection, wager_type, odds, units, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
     conn.close()
-    
-    return JSONResponse({
-        "status": "completed",
-        "matches_evaluated": max(count, 1000),
-        "outright_accuracy_pct": 80.8,
-        "mean_brier_score": 0.1524,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
+    return JSONResponse({"status": "logged"})
 
 @app.get("/", response_class=HTMLResponse)
-def render_dashboard():
-    if not os.path.exists(DB_NAME):
-        return "<html><body><h2 style='color:red;'>Database not initialized.</h2></body></html>"
-    
+def dashboard():
+    init_betting_table()
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM Model_Forecasts ORDER BY created_at DESC LIMIT 20;")
+    
+    # Fetch active predictions
+    c.execute("SELECT * FROM Model_Forecasts ORDER BY created_at DESC;")
     forecasts = [dict(row) for row in c.fetchall()]
     
+    # Fetch correlation betas
     c.execute("SELECT * FROM Feature_Correlations;")
     betas = {row['vector_name']: row['beta_weight'] for row in c.fetchall()}
     
-    c.execute("SELECT * FROM Historical_Forecasts ORDER BY evaluated_at DESC LIMIT 10;")
-    audits = [dict(row) for row in c.fetchall()]
-    conn.close()
+    # Fetch historical post-mortems with accuracy derivation
+    c.execute("SELECT * FROM Historical_Forecasts ORDER BY evaluated_at DESC;")
+    raw_audits = [dict(row) for row in c.fetchall()]
+    audits = []
+    correct_count = 0
+    total_brier = 0.0
     
+    for a in raw_audits:
+        pred_winner = a['player_a'] if a['prob_a_win'] >= a['prob_b_win'] else a['player_b']
+        hit = (pred_winner == a['actual_winner'])
+        if hit:
+            correct_count += 1
+        total_brier += a['brier_score']
+        audits.append({**a, "predicted_winner": pred_winner, "hit": hit})
+    
+    audit_total = len(audits)
+    accuracy_rate = round((correct_count / audit_total * 100), 1) if audit_total > 0 else 0.0
+    mean_brier = round(total_brier / audit_total, 4) if audit_total > 0 else 0.0
+    
+    # Fetch betting logs & performance
+    c.execute("SELECT * FROM Betting_Logs ORDER BY logged_at DESC;")
+    bets = [dict(row) for row in c.fetchall()]
+    net_units = round(sum(b['payout_units'] for b in bets if b['status'] in ('WON', 'LOST')), 2)
+    won_bets = sum(1 for b in bets if b['status'] == 'WON')
+    resolved_bets = sum(1 for b in bets if b['status'] in ('WON', 'LOST'))
+    bet_win_rate = round((won_bets / resolved_bets * 100), 1) if resolved_bets > 0 else 0.0
+    
+    conn.close()
+
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -109,112 +167,217 @@ def render_dashboard():
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0, viewport-fit=cover">
         <meta name="theme-color" content="#000000">
-        <title>tennis_lg | Autonomous Engine</title>
+        <title>tennis_lg | Terminal</title>
         <style>
             :root {{
-                --bg-main: #000000;
-                --bg-card: #121212;
-                --text-main: #f5f5f7;
-                --text-muted: #8e8e93;
-                --accent-primary: #0a84ff;
-                --accent-success: #30d158;
-                --accent-purple: #bf5af2;
-                --border-color: #2c2c2e;
+                --bg: #000000;
+                --card: #121212;
+                --card-sub: #18181a;
+                --text: #f5f5f7;
+                --muted: #8e8e93;
+                --blue: #0a84ff;
+                --green: #30d158;
+                --red: #ff453a;
+                --purple: #bf5af2;
+                --border: #2c2c2e;
             }}
-            * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }}
-            body {{
-                background-color: var(--bg-main); color: var(--text-main);
-                font-family: system-ui, -apple-system, sans-serif; margin: 0;
-                padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom) 16px;
+            * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; font-family: system-ui, -apple-system, sans-serif; }}
+            body {{ background: var(--bg); color: var(--text); margin: 0; padding: env(safe-area-inset-top) 16px 80px 16px; }}
+            h1 {{ font-size: 1.3rem; margin: 16px 0 4px 0; font-weight: 800; }}
+            .sub-status {{ font-size: 0.75rem; color: var(--muted); font-family: monospace; display: flex; align-items: center; gap: 6px; margin-bottom: 16px; }}
+            .dot {{ width: 8px; height: 8px; background: var(--green); border-radius: 50%; box-shadow: 0 0 8px var(--green); }}
+            
+            /* Section Tabs */
+            .tabs {{ display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; }}
+            .tab-btn {{
+                background: var(--card); border: 1px solid var(--border); color: var(--muted);
+                padding: 10px 14px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; white-space: nowrap; cursor: pointer;
             }}
-            h1 {{ font-size: 1.3rem; margin-top: 16px; margin-bottom: 4px; font-weight: 700; }}
-            .sync-indicator {{ font-size: 0.75rem; color: var(--text-muted); margin-bottom: 14px; font-family: monospace; display: flex; align-items: center; }}
-            .status-dot {{ height: 8px; width: 8px; background-color: var(--accent-success); border-radius: 50%; display: inline-block; margin-right: 8px; box-shadow: 0 0 8px var(--accent-success); }}
-            h2 {{ font-size: 1.05rem; margin-top: 20px; margin-bottom: 10px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
-            .card {{ background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 18px; padding: 14px; margin-bottom: 12px; }}
-            .card-header {{ font-size: 1rem; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; }}
-            .tour-badge {{ background: var(--accent-purple); color: white; font-size: 0.7rem; font-weight: 800; padding: 3px 6px; border-radius: 5px; margin-right: 8px; }}
-            .stat-row {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color); font-size: 0.9rem; }}
-            .stat-row:last-child {{ border-bottom: none; }}
-            .stat-label {{ color: var(--text-muted); }}
-            .val-pos {{ color: var(--accent-success); font-weight: 700; }}
-            .val-neutral {{ color: var(--text-main); font-weight: 600; }}
-            .btn-primary {{
-                background: var(--accent-primary); color: white; border: none; width: 100%;
-                padding: 12px; border-radius: 12px; font-size: 0.95rem; font-weight: 700; cursor: pointer;
+            .tab-btn.active {{ background: var(--blue); color: white; border-color: var(--blue); }}
+            
+            /* Search Input */
+            .search-box {{
+                width: 100%; background: var(--card); border: 1px solid var(--border);
+                color: var(--text); padding: 12px 14px; border-radius: 14px; font-size: 0.95rem; margin-bottom: 14px; outline: none;
             }}
-            .beta-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
-            .beta-pill {{ background: var(--bg-card); border: 1px solid var(--border-color); padding: 10px; border-radius: 14px; text-align: center; }}
-            .beta-label {{ font-size: 0.75rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; }}
-            .beta-val {{ color: var(--accent-primary); display: block; margin-top: 4px; font-size: 1.15rem; font-weight: 700; font-family: monospace; }}
+            .search-box:focus {{ border-color: var(--blue); }}
+            
+            /* Metrics Ribbon */
+            .metrics-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 18px; }}
+            .metric-pill {{ background: var(--card); border: 1px solid var(--border); padding: 10px 6px; border-radius: 12px; text-align: center; }}
+            .metric-title {{ font-size: 0.65rem; color: var(--muted); font-weight: 700; text-transform: uppercase; }}
+            .metric-val {{ font-size: 1rem; font-weight: 800; margin-top: 4px; font-family: monospace; }}
+            
+            /* Cards */
+            .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 18px; padding: 14px; margin-bottom: 12px; }}
+            .card-header {{ display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 0.95rem; margin-bottom: 10px; }}
+            .tour-tag {{ background: var(--purple); color: white; font-size: 0.65rem; font-weight: 800; padding: 3px 6px; border-radius: 4px; }}
+            .row {{ display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.88rem; }}
+            .row:last-of-type {{ border-bottom: none; }}
+            .lbl {{ color: var(--muted); }}
+            .green {{ color: var(--green); font-weight: 700; }}
+            .red {{ color: var(--red); font-weight: 700; }}
+            
+            /* Bet Log Button */
+            .btn-action {{
+                width: 100%; background: #1f2937; border: 1px solid #374151; color: var(--text);
+                padding: 10px; border-radius: 12px; font-weight: 700; font-size: 0.85rem; margin-top: 10px; cursor: pointer;
+            }}
+            .btn-action:active {{ transform: scale(0.98); background: var(--blue); }}
+            
+            /* Status badges */
+            .badge-won {{ background: rgba(48,209,88,0.2); color: var(--green); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
+            .badge-lost {{ background: rgba(255,69,58,0.2); color: var(--red); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
+            .badge-pending {{ background: rgba(10,132,255,0.2); color: var(--blue); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
         </style>
         <script>
-            // Check immediately upon tab visibility
-            document.addEventListener('visibilitychange', () => {{
-                if (document.visibilityState === 'visible') {{
-                    fetch('/api/sync', {{ method: 'POST' }}).then(() => window.location.reload());
-                }}
-            }});
-
-            function confirmBacktest() {{
-                if (confirm("Execute 1,000-match walk-forward backtest?")) {{
-                    fetch('/api/backtest/run', {{ method: 'POST' }})
-                    .then(r => r.json())
-                    .then(d => alert(`Backtest Complete\\nAccuracy: ${{d.outright_accuracy_pct}}%\\nBrier: ${{d.mean_brier_score}}`));
-                }}
+            function setTab(name) {{
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-pane').forEach(p => p.style.display = 'none');
+                document.getElementById('btn-' + name).classList.add('active');
+                document.getElementById('pane-' + name).style.display = 'block';
+            }}
+            
+            function filterMatches() {{
+                const q = document.getElementById('search-input').value.toLowerCase();
+                document.querySelectorAll('.match-card').forEach(c => {{
+                    const text = c.getAttribute('data-search').toLowerCase();
+                    c.style.display = text.includes(q) ? 'block' : 'none';
+                }});
+            }}
+            
+            async function logWager(matchId, tour, sel, odds) {{
+                const units = prompt(`Log Wager on ${{sel}} (${{odds > 0 ? '+' : ''}}${{odds}})\\nEnter stake in units:`, "1.0");
+                if (!units || isNaN(units)) return;
+                
+                await fetch('/api/bet/log', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ match_id: matchId, tour: tour, selection: sel, wager_type: 'Moneyline', odds: odds, units: parseFloat(units) }})
+                }});
+                alert(`Logged ${{units}}u on ${{sel}}.`);
+                window.location.reload();
             }}
         </script>
     </head>
     <body>
-        <h1><span class="status-dot"></span>tennis_lg Autonomous Engine</h1>
-        <div class="sync-indicator">Daemon Active • Self-polling every 15 mins (24/7)</div>
+        <h1>tennis_lg Live Station</h1>
+        <div class="sub-status"><span class="dot"></span> Auto-learning cycle running 24/7 (15m cadence)</div>
 
-        <div class="card">
-            <button class="btn-primary" onclick="confirmBacktest()">▶ Run Walk-Forward Backtest</button>
+        <div class="metrics-grid">
+            <div class="metric-pill">
+                <div class="metric-title">Outright Acc</div>
+                <div class="metric-val green">{accuracy_rate}%</div>
+            </div>
+            <div class="metric-pill">
+                <div class="metric-title">Audited Games</div>
+                <div class="metric-val">{audit_total}</div>
+            </div>
+            <div class="metric-pill">
+                <div class="metric-title">Brier Score</div>
+                <div class="metric-val">{mean_brier}</div>
+            </div>
+            <div class="metric-pill">
+                <div class="metric-title">Betting Net</div>
+                <div class="metric-val {'green' if net_units >= 0 else 'red'}">{net_units:+.2f}u</div>
+            </div>
         </div>
 
-        <h2>Learned Correlations (β)</h2>
-        <div class="beta-grid">
-            <div class="beta-pill"><span class="beta-label">Physics</span><span class="beta-val">{betas.get('v_physics', 1.0):.4f}</span></div>
-            <div class="beta-pill"><span class="beta-label">Thermo</span><span class="beta-val">{betas.get('v_thermo', 1.0):.4f}</span></div>
-            <div class="beta-pill"><span class="beta-label">Fatigue</span><span class="beta-val">{betas.get('v_bio', 1.0):.4f}</span></div>
-            <div class="beta-pill"><span class="beta-label">Variance</span><span class="beta-val">{betas.get('v_variance', 1.0):.4f}</span></div>
+        <div class="tabs">
+            <button id="btn-slate" class="tab-btn active" onclick="setTab('slate')">Predictions Slate</button>
+            <button id="btn-audits" class="tab-btn" onclick="setTab('audits')">Factual Audits ({audit_total})</button>
+            <button id="btn-bets" class="tab-btn" onclick="setTab('bets')">Betting Log ({len(bets)})</button>
         </div>
 
-        <h2>Active Slate</h2>
+        <!-- TAB 1: PREDICTIONS SLATE -->
+        <div id="pane-slate" class="tab-pane">
+            <input type="text" id="search-input" class="search-box" placeholder="🔍 Search player or tournament..." onkeyup="filterMatches()">
     """
+    
     if not forecasts:
-        html += "<div class='card'><div class='stat-label'>No pending matches on active slate.</div></div>"
+        html += "<div class='card'><div class='lbl'>No pending fixtures queued. Running ingestion cycle...</div></div>"
     for f in forecasts:
         fav = f['player_a'] if f['prob_a_win'] >= 0.5 else f['player_b']
         fav_prob = max(f['prob_a_win'], f['prob_b_win']) * 100
-        ml = f['american_ml_a'] if fav == f['player_a'] else f['american_ml_b']
-        ml_str = f"+{ml}" if ml > 0 else str(ml)
+        fav_ml = f['american_ml_a'] if fav == f['player_a'] else f['american_ml_b']
+        fav_ml_str = f"+{fav_ml}" if fav_ml > 0 else str(fav_ml)
         
         html += f"""
-        <div class="card">
-            <div class="card-header"><span class="tour-badge">{f['tour']}</span> {f['player_a']} vs {f['player_b']}</div>
-            <div class="stat-row"><span class="stat-label">Projected Outright</span> <span class="val-pos">{fav} ({fav_prob:.1f}%)</span></div>
-            <div class="stat-row"><span class="stat-label">Fair Moneyline</span> <span class="val-neutral">{ml_str}</span></div>
-            <div class="stat-row"><span class="stat-label">Game Spread</span> <span class="val-neutral">{f['proj_game_spread']:+.1f} Games</span></div>
-            <div class="stat-row"><span class="stat-label">Total Games</span> <span class="val-neutral">{f['proj_total_games']}</span></div>
+        <div class="card match-card" data-search="{f['tour']} {f['player_a']} {f['player_b']} {f['tournament_id']}">
+            <div class="card-header">
+                <span>{f['player_a']} vs {f['player_b']}</span>
+                <span class="tour-tag">{f['tour']}</span>
+            </div>
+            <div class="row"><span class="lbl">Predicted Outright</span> <span class="green">{fav} ({fav_prob:.1f}%)</span></div>
+            <div class="row"><span class="lbl">Fair FanDuel ML</span> <span>{fav_ml_str}</span></div>
+            <div class="row"><span class="lbl">Median Game Spread</span> <span>{f['proj_game_spread']:+.1f} Games</span></div>
+            <div class="row"><span class="lbl">Total Games Line</span> <span>{f['proj_total_games']}</span></div>
+            <div class="row"><span class="lbl">Causal Edge</span> <span>{f['net_edge']:+.4f}</span></div>
+            <button class="btn-action" onclick="logWager('{f['match_id']}', '{f['tour']}', '{fav}', {fav_ml})">
+                + Add {fav} ({fav_ml_str}) to Betting Log
+            </button>
         </div>
         """
         
-    html += "<h2>Recent Factual Audits</h2>"
+    html += f"""
+        </div>
+
+        <!-- TAB 2: FACTUAL AUDITS (WHAT IT HAS PREDICTED & LEARNED FROM) -->
+        <div id="pane-audits" class="tab-pane" style="display: none;">
+    """
     if not audits:
-        html += "<div class='card'><div class='stat-label'>Awaiting official match completions.</div></div>"
+        html += "<div class='card'><div class='lbl'>No match outcomes audited yet. Matches audit upon official completion.</div></div>"
     for a in audits:
+        verdict = "<span class='badge-won'>HIT ✅</span>" if a['hit'] else "<span class='badge-lost'>MISS ❌</span>"
         html += f"""
         <div class="card">
-            <div class="card-header" style="font-size: 0.95rem;">{a['player_a']} vs {a['player_b']}</div>
-            <div class="stat-row"><span class="stat-label">Official Winner</span> <span class="val-pos">{a['actual_winner']}</span></div>
-            <div class="stat-row"><span class="stat-label">Actual Total / Spread</span> <span class="val-neutral">{a['actual_total_games']} / {a['actual_game_spread']:+.1f}</span></div>
-            <div class="stat-row"><span class="stat-label">Brier Score</span> <span class="val-neutral">{a['brier_score']:.4f}</span></div>
+            <div class="card-header">
+                <span>{a['player_a']} vs {a['player_b']}</span>
+                {verdict}
+            </div>
+            <div class="row"><span class="lbl">Model Projected</span> <span>{a['predicted_winner']} ({(max(a['prob_a_win'], a['prob_b_win'])*100):.1f}%)</span></div>
+            <div class="row"><span class="lbl">Official Winner</span> <span class="green">{a['actual_winner']}</span></div>
+            <div class="row"><span class="lbl">Actual Games / Spread</span> <span>{a['actual_total_games']} Games ({a['actual_game_spread']:+d})</span></div>
+            <div class="row"><span class="lbl">Match Brier Score</span> <span>{a['brier_score']:.4f}</span></div>
+            <div class="row"><span class="lbl">Audit Timestamp</span> <span style="font-family: monospace; font-size: 0.75rem;">{a['evaluated_at']}</span></div>
         </div>
         """
-        
-    html += "</body></html>"
+
+    html += f"""
+        </div>
+
+        <!-- TAB 3: BETTING LOGS & PROFIT TRACKER -->
+        <div id="pane-bets" class="tab-pane" style="display: none;">
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header"><span>Betting Performance</span> <span class="green">{bet_win_rate}% Win Rate</span></div>
+                <div class="row"><span class="lbl">Settled Bets</span> <span>{resolved_bets}</span></div>
+                <div class="row"><span class="lbl">Pending Action</span> <span>{len(bets) - resolved_bets}</span></div>
+                <div class="row"><span class="lbl">Net Return</span> <span class="{'green' if net_units >= 0 else 'red'}">{net_units:+.2f} units</span></div>
+            </div>
+    """
+    if not bets:
+        html += "<div class='card'><div class='lbl'>No bets logged yet. Use the '+ Add to Betting Log' button on any active match.</div></div>"
+    for b in bets:
+        status_tag = f"<span class='badge-{b['status'].lower()}'>{b['status']}</span>"
+        payout_display = f"{b['payout_units']:+.2f}u" if b['status'] in ('WON', 'LOST') else "In Play"
+        html += f"""
+        <div class="card">
+            <div class="card-header">
+                <span>{b['selection']} ({'+' if b['odds'] > 0 else ''}{b['odds']})</span>
+                {status_tag}
+            </div>
+            <div class="row"><span class="lbl">Tour / Type</span> <span>{b['tour']} • {b['wager_type']}</span></div>
+            <div class="row"><span class="lbl">Stake Risked</span> <span>{b['units']} units</span></div>
+            <div class="row"><span class="lbl">Net Result</span> <span class="{'green' if b['payout_units'] > 0 else ('red' if b['payout_units'] < 0 else '')}">{payout_display}</span></div>
+            <div class="row"><span class="lbl">Logged Time</span> <span style="font-family: monospace; font-size: 0.75rem;">{b['logged_at']}</span></div>
+        </div>
+        """
+
+    html += """
+        </div>
+    </body>
+    </html>
+    """
     return html
 
 if __name__ == "__main__":
