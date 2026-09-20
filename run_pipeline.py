@@ -46,7 +46,6 @@ def run_slate_forecasts(iterations=3500):
         res = simulate_match_monte_carlo(p1, p2, cond, iterations=iterations)
         v = res["causal_vectors"]
 
-        # Insert exact 17 values matching the schema
         c.execute("INSERT OR REPLACE INTO Model_Forecasts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);", (
             match_id, t_id, tour, p1.name, p2.name, res["prob_a_win"], res["prob_b_win"],
             res["american_ml_a"], res["american_ml_b"], res["proj_mean_total_games"], res["proj_median_game_spread"],

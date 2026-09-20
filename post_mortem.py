@@ -11,7 +11,6 @@ def execute_factual_post_mortem(match_id, actual_winner, actual_total, actual_sp
     f = c.fetchone()
     if not f: return print(f"[ERROR] Forecast missing for {match_id}")
 
-    # Safely Unpack the 17-Column Forecast Schema
     _, _, _, p_a, p_b, prob_a, prob_b, _, _, proj_tot, proj_spr, v_phys, v_therm, v_bio, v_var, _, _ = f
     
     y_a = 1.0 if actual_winner == p_a else 0.0
@@ -42,5 +41,3 @@ def execute_factual_post_mortem(match_id, actual_winner, actual_total, actual_sp
     print(f"\n[POST-MORTEM] {p_a} vs {p_b} | Brier: {brier:.4f} | Error Margin: {error_margin:+.3f}")
     print(f"  -> Updated Beta Weights: Bio({new_betas['v_bio']:.3f}), Thermo({new_betas['v_thermo']:.3f})")
 
-if __name__ == "__main__":
-    execute_factual_post_mortem("MATCH_ATF_001", "Yunchaokete Bu", 19, -5)

@@ -2,9 +2,8 @@
 import sqlite3
 import random
 import argparse
-import sys
 from dataclasses import dataclass
-from typing import Dict, Any, Tuple
+from typing import Dict
 
 DB_NAME = "tennis_lg.db"
 
@@ -20,12 +19,15 @@ class MatchConditions:
     is_indoor: bool; elevation_m: float; temp_c: float; humidity_pct: float; best_of: int
 
 def fetch_correlation_betas() -> Dict[str, float]:
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT vector_name, beta_weight FROM Feature_Correlations;")
-    betas = {row[0]: row[1] for row in c.fetchall()}
-    conn.close()
-    return betas if betas else {"v_physics": 1.0, "v_thermo": 1.0, "v_bio": 1.0, "v_variance": 1.0}
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT vector_name, beta_weight FROM Feature_Correlations;")
+        betas = {row[0]: row[1] for row in c.fetchall()}
+        conn.close()
+        return betas if betas else {"v_physics": 1.0, "v_thermo": 1.0, "v_bio": 1.0, "v_variance": 1.0}
+    except Exception:
+        return {"v_physics": 1.0, "v_thermo": 1.0, "v_bio": 1.0, "v_variance": 1.0}
 
 def compute_causal_decomposition(p_a: PlayerProfile, p_b: PlayerProfile, cond: MatchConditions) -> dict:
     betas = fetch_correlation_betas()
@@ -58,10 +60,11 @@ def compute_causal_decomposition(p_a: PlayerProfile, p_b: PlayerProfile, cond: M
         raw_var = ((60.0 / (p_b.sample_points + 60.0)) * 0.02) - ((60.0 / (p_a.sample_points + 60.0)) * 0.02)
     v_var = raw_var * betas.get("v_variance", 1.0)
 
+    net = v_phys + v_therm + v_bio + v_var
     return {
         "v_physics": round(v_phys, 4), "v_thermo": round(v_therm, 4),
         "v_bio": round(v_bio, 4), "v_variance": round(v_var, 4),
-        "net_edge": round(v_phys + v_therm + v_bio + v_var, 4)
+        "net_edge": round(net, 4)
     }
 
 def calculate_point_win_prob(server_p: float, returner_q: float, tour: str, is_bp: bool=False, sv_bps: float=0.65, ret_bpc: float=0.40) -> float:
@@ -85,7 +88,7 @@ def simulate_game(p_s, q_r, tour, s_bps, r_bpc):
         if r >= 4 and (r - s) >= 2: return 0, (s + r)
 
 def simulate_tiebreak(p_sa, p_sb, q_ra, q_rb, tour):
-    a, b, pt = 0, 0, 1
+    a, b, pt = 1, 0, 1  
     while True:
         s_is_a = (pt % 4 in (1, 0)) if pt > 1 else True
         if s_is_a:
@@ -120,12 +123,15 @@ def simulate_set(p_sa, p_sb, q_ra, q_rb, pa, pb, cond, s_starts_a):
 
 def simulate_match_monte_carlo(p_a, p_b, cond, iterations=3500):
     v = compute_causal_decomposition(p_a, p_b, cond)
-    epa, epb = p_a.serve_p + (v["net_edge"] * 0.5), p_b.serve_p - (v["net_edge"] * 0.5)
-    eqa, eqb = p_a.return_q + (v["net_edge"] * 0.5), p_b.return_q - (v["net_edge"] * 0.5)
+    epa = p_a.serve_p + (v["net_edge"] * 0.5)
+    epb = p_b.serve_p - (v["net_edge"] * 0.5)
+    eqa = p_a.return_q + (v["net_edge"] * 0.5)
+    eqb = p_b.return_q - (v["net_edge"] * 0.5)
 
     if cond.tour == 'ITF':
         wa, wb = p_a.sample_points / (p_a.sample_points + 60.0), p_b.sample_points / (p_b.sample_points + 60.0)
-        epa, epb = (wa * epa) + ((1.0 - wa) * 0.62), (wb * epb) + ((1.0 - wb) * 0.62)
+        epa = (wa * epa) + ((1.0 - wa) * 0.62)
+        epb = (wb * epb) + ((1.0 - wb) * 0.62)
 
     s2w = 3 if cond.best_of == 5 else 2
     w_a, w_b, tg_list, gd_list = 0, 0, [], []
@@ -139,12 +145,18 @@ def simulate_match_monte_carlo(p_a, p_b, cond, iterations=3500):
             else: sb += 1
         if sa == s2w: w_a += 1
         else: w_b += 1
-        tg_list.append(mga + mgb); gd_list.append(mga - mgb)
+        tg_list.append(mga + mgb)
+        gd_list.append(mga - mgb)
 
     tg_list.sort(); gd_list.sort()
-    prob_a, prob_b = round(w_a / iterations, 4), round(w_b / iterations, 4)
-    ml_a = int((-(prob_a / prob_b) * 100) if prob_a >= 0.50 else ((prob_b / prob_a) * 100))
-    ml_b = int((-(prob_b / prob_a) * 100) if prob_b >= 0.50 else ((prob_a / prob_b) * 100))
+    prob_a = round(w_a / iterations, 4)
+    prob_b = round(w_b / iterations, 4)
+    
+    if prob_a == 0: ml_a = 10000; ml_b = -10000
+    elif prob_b == 0: ml_a = -10000; ml_b = 10000
+    else:
+        ml_a = int((-(prob_a / prob_b) * 100) if prob_a >= 0.50 else ((prob_b / prob_a) * 100))
+        ml_b = int((-(prob_b / prob_a) * 100) if prob_b >= 0.50 else ((prob_a / prob_b) * 100))
 
     return {
         "prob_a_win": prob_a, "prob_b_win": prob_b, "american_ml_a": ml_a, "american_ml_b": ml_b,
@@ -170,11 +182,6 @@ def init_db():
     
     # Initialize Correlation Betas to 1.00
     c.execute("INSERT OR IGNORE INTO Feature_Correlations VALUES ('v_physics', 1.0, datetime('now')), ('v_thermo', 1.0, datetime('now')), ('v_bio', 1.0, datetime('now')), ('v_variance', 1.0, datetime('now'));")
-    
-    # Seed Data
-    c.execute("INSERT OR IGNORE INTO Tournaments VALUES ('ATF_CHALLENGER_BEIJING', 'Beijing Regional Challenger', 'ATF', 'Hard', 36.0, 0, 44.0, 3);")
-    c.execute("INSERT OR IGNORE INTO Players VALUES ('ATF_ZHANG', 'Zhizhen Zhang', 'ATF', 'R', '2H', 0.650, 0.385, 0.64, 0.41, 2900, 9200, 6.2, 0, datetime('now')), ('ATF_BU', 'Yunchaokete Bu', 'ATF', 'R', '2H', 0.635, 0.395, 0.62, 0.39, 2750, 6800, 1.5, 2, datetime('now'));")
-    c.execute("INSERT OR REPLACE INTO Daily_Card VALUES ('MATCH_ATF_001', 'ATF_CHALLENGER_BEIJING', 'ATF', 'ATF_ZHANG', 'ATF_BU', 33.0, 82.0, 'SCHEDULED', datetime('now'));")
     conn.commit(); conn.close()
 
 if __name__ == "__main__":
