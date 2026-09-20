@@ -1,5 +1,5 @@
 nohup: ignoring input
-INFO:     Started server process [5013]
+INFO:     Started server process [6948]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
@@ -17,3 +17,7 @@ Traceback (most recent call last):
     t = dict(c.fetchone())
 TypeError: 'NoneType' object is not iterable
 [AUDITOR] All forecasts in database are audited and synchronized.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [5013]
