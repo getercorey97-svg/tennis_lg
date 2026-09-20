@@ -1,50 +1,70 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Mobile Web Dashboard & Client-Aware Live Sync Engine
+tennis_lg: Mobile Web Dashboard & Autonomous 24/7 Engine
 Optimized for Samsung Galaxy S26 Ultra AMOLED Display.
 """
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+from contextlib import asynccontextmanager
+import asyncio
 import subprocess
 import sqlite3
 import os
-import time
 import uvicorn
 from datetime import datetime
 
-app = FastAPI(title="tennis_lg Operational Dashboard")
 DB_NAME = "tennis_lg.db"
-
-# Track last synchronization timestamp to prevent duplicate execution
-LAST_SYNC_TIMESTAMP = 0
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     return conn
 
-def execute_pipeline_sync():
-    """Runs live scraper and executes Monte Carlo forecast pipeline."""
-    global LAST_SYNC_TIMESTAMP
-    now = time.time()
-    if now - LAST_SYNC_TIMESTAMP < 120:
-        return {"status": "debounced", "message": "Sync skipped (executed within last 2 minutes)"}
-    
-    try:
-        print(f"[LIVE SYNC] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Executing slate update...")
-        subprocess.run(["python3", "scraper.py"], check=False)
-        subprocess.run(["python3", "run_pipeline.py"], check=False)
-        LAST_SYNC_TIMESTAMP = now
-        return {"status": "completed", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    except Exception as e:
-        print(f"[LIVE SYNC ERROR] {e}")
-        return {"status": "error", "detail": str(e)}
+async def autonomous_engine_cycle(interval_minutes: int = 15):
+    """24/7 Autonomous execution loop: scrape -> simulate -> audit."""
+    await asyncio.sleep(5)  # Initial grace period on boot
+    while True:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[AUTONOMOUS CYCLE START] {now_str}")
+        try:
+            # 1. Pull active matches
+            subprocess.run(["python3", "scraper.py"], check=False)
+            
+            # 2. Compute pre-match Monte Carlo forecasts
+            subprocess.run(["python3", "run_pipeline.py"], check=False)
+            
+            # 3. Ingest finished results and update beta weights
+            subprocess.run(["python3", "post_mortem.py"], check=False)
+            
+        except Exception as e:
+            print(f"[AUTONOMOUS CYCLE ERROR] {e}")
+            
+        print(f"[AUTONOMOUS CYCLE FINISHED] Sleeping for {interval_minutes} minutes...\n")
+        await asyncio.sleep(interval_minutes * 60)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    worker_task = asyncio.create_task(autonomous_engine_cycle(interval_minutes=15))
+    yield
+    worker_task.cancel()
+
+app = FastAPI(title="tennis_lg Operational Hub", lifespan=lifespan)
+
+@app.get("/health")
+def health_check():
+    """Lightweight endpoint for uptime keep-alive pings."""
+    return {"status": "healthy", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 @app.post("/api/sync")
-def trigger_sync(background_tasks: BackgroundTasks):
-    """Endpoint called by active browser session every 10 minutes."""
-    background_tasks.add_task(execute_pipeline_sync)
-    return JSONResponse({"status": "sync_queued", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+def manual_sync():
+    """Instant trigger when user opens or refreshes app."""
+    try:
+        subprocess.run(["python3", "scraper.py"], check=False)
+        subprocess.run(["python3", "run_pipeline.py"], check=False)
+        subprocess.run(["python3", "post_mortem.py"], check=False)
+        return JSONResponse({"status": "completed"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 @app.post("/api/backtest/run")
 def run_backtest():
@@ -89,7 +109,7 @@ def render_dashboard():
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0, viewport-fit=cover">
         <meta name="theme-color" content="#000000">
-        <title>tennis_lg | Live Engine</title>
+        <title>tennis_lg | Autonomous Engine</title>
         <style>
             :root {{
                 --bg-main: #000000;
@@ -108,7 +128,7 @@ def render_dashboard():
                 padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom) 16px;
             }}
             h1 {{ font-size: 1.3rem; margin-top: 16px; margin-bottom: 4px; font-weight: 700; }}
-            .sync-indicator {{ font-size: 0.75rem; color: var(--text-muted); margin-bottom: 12px; font-family: monospace; display: flex; align-items: center; }}
+            .sync-indicator {{ font-size: 0.75rem; color: var(--text-muted); margin-bottom: 14px; font-family: monospace; display: flex; align-items: center; }}
             .status-dot {{ height: 8px; width: 8px; background-color: var(--accent-success); border-radius: 50%; display: inline-block; margin-right: 8px; box-shadow: 0 0 8px var(--accent-success); }}
             h2 {{ font-size: 1.05rem; margin-top: 20px; margin-bottom: 10px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
             .card {{ background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 18px; padding: 14px; margin-bottom: 12px; }}
@@ -127,39 +147,12 @@ def render_dashboard():
             .beta-pill {{ background: var(--bg-card); border: 1px solid var(--border-color); padding: 10px; border-radius: 14px; text-align: center; }}
             .beta-label {{ font-size: 0.75rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; }}
             .beta-val {{ color: var(--accent-primary); display: block; margin-top: 4px; font-size: 1.15rem; font-weight: 700; font-family: monospace; }}
-            .progress-line {{
-                height: 2px; width: 100%; background: #1c1c1e; position: fixed; top: 0; left: 0;
-            }}
-            .progress-fill {{
-                height: 100%; width: 0%; background: var(--accent-primary);
-                animation: countdown 600s linear infinite;
-            }}
-            @keyframes countdown {{
-                0% {{ width: 0%; }}
-                100% {{ width: 100%; }}
-            }}
         </style>
         <script>
-            // Active Tab Repoll Engine (Every 10 Minutes = 600,000ms)
-            const POLL_INTERVAL_MS = 600000;
-            
-            async function performLiveRepoll() {{
-                if (document.visibilityState === 'visible') {{
-                    try {{
-                        await fetch('/api/sync', {{ method: 'POST' }});
-                        setTimeout(() => {{ window.location.reload(); }}, 3000);
-                    }} catch (e) {{
-                        console.error('Auto-sync error:', e);
-                    }}
-                }}
-            }}
-
-            setInterval(performLiveRepoll, POLL_INTERVAL_MS);
-
-            // Re-sync when returning to the tab after sleep/switching apps
+            // Check immediately upon tab visibility
             document.addEventListener('visibilitychange', () => {{
                 if (document.visibilityState === 'visible') {{
-                    performLiveRepoll();
+                    fetch('/api/sync', {{ method: 'POST' }}).then(() => window.location.reload());
                 }}
             }});
 
@@ -173,9 +166,8 @@ def render_dashboard():
         </script>
     </head>
     <body>
-        <div class="progress-line"><div class="progress-fill"></div></div>
-        <h1><span class="status-dot"></span>tennis_lg Live Engine</h1>
-        <div class="sync-indicator">Active Tab Mode • Auto-syncing every 10 mins</div>
+        <h1><span class="status-dot"></span>tennis_lg Autonomous Engine</h1>
+        <div class="sync-indicator">Daemon Active • Self-polling every 15 mins (24/7)</div>
 
         <div class="card">
             <button class="btn-primary" onclick="confirmBacktest()">▶ Run Walk-Forward Backtest</button>
@@ -206,6 +198,19 @@ def render_dashboard():
             <div class="stat-row"><span class="stat-label">Fair Moneyline</span> <span class="val-neutral">{ml_str}</span></div>
             <div class="stat-row"><span class="stat-label">Game Spread</span> <span class="val-neutral">{f['proj_game_spread']:+.1f} Games</span></div>
             <div class="stat-row"><span class="stat-label">Total Games</span> <span class="val-neutral">{f['proj_total_games']}</span></div>
+        </div>
+        """
+        
+    html += "<h2>Recent Factual Audits</h2>"
+    if not audits:
+        html += "<div class='card'><div class='stat-label'>Awaiting official match completions.</div></div>"
+    for a in audits:
+        html += f"""
+        <div class="card">
+            <div class="card-header" style="font-size: 0.95rem;">{a['player_a']} vs {a['player_b']}</div>
+            <div class="stat-row"><span class="stat-label">Official Winner</span> <span class="val-pos">{a['actual_winner']}</span></div>
+            <div class="stat-row"><span class="stat-label">Actual Total / Spread</span> <span class="val-neutral">{a['actual_total_games']} / {a['actual_game_spread']:+.1f}</span></div>
+            <div class="stat-row"><span class="stat-label">Brier Score</span> <span class="val-neutral">{a['brier_score']:.4f}</span></div>
         </div>
         """
         
