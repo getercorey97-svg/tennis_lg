@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Real-Time Tournament & Player Roster Ingestion Engine
-Discovers all ongoing tournaments (ATP, WTA, Challenger, ITF, Davis Cup)
-and retrieves every player competing in active draws.
+tennis_lg: Multi-Tour Ingestion Engine
+Correctly maps official tournament titles, surfaces, and active matches.
 """
 
 import sqlite3
@@ -22,32 +21,28 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
-def clean_name(name: str) -> str:
-    return re.sub(r'\s+', ' ', name.replace('\xa0', ' ')).strip()
+def clean_txt(t):
+    return re.sub(r'\s+', ' ', t.replace('\xa0', ' ')).strip()
 
-def sync_active_tournaments_and_rosters():
+def sync_active_tournaments():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Clear out previous scheduled fixtures
     c.execute("DELETE FROM Daily_Card WHERE status = 'SCHEDULED';")
 
     tournaments_discovered = {}
     players_discovered = set()
     matches_queued = 0
 
-    # 1. Ingest Main-Tour Tournaments & Players (ESPN API)
+    # 1. ESPN Main Tour
     for tour, url in ESPN_ENDPOINTS.items():
         try:
-            print(f"[SCRAPER] Scanning active {tour} tournaments on ESPN...")
             res = requests.get(url, headers=HEADERS, timeout=8)
             if res.status_code == 200:
-                events = res.json().get("events", [])
-                for ev in events:
-                    t_name = clean_name(ev.get("name", f"{tour} Championship"))
-                    t_id = f"{tour}_{ev.get('id', 'EVENT')}"
-                    
+                for ev in res.json().get("events", []):
+                    t_name = clean_txt(ev.get("name", f"{tour} Tour"))
+                    t_id = f"{tour}_{ev.get('id', 'EV')}"
                     surface = "Clay" if "clay" in t_name.lower() else ("Grass" if "grass" in t_name.lower() else "Hard")
                     cpi = 28.0 if surface == "Clay" else (45.0 if surface == "Grass" else 38.0)
 
@@ -56,12 +51,11 @@ def sync_active_tournaments_and_rosters():
                     for comp in ev.get("competitions", []):
                         comps = comp.get("competitors", [])
                         if len(comps) == 2:
-                            p_a = clean_name(comps[0].get("athlete", {}).get("displayName", ""))
-                            p_b = clean_name(comps[1].get("athlete", {}).get("displayName", ""))
-                            
-                            if "/" in p_a or "/" in p_b or "TBD" in p_a or not p_a or not p_b:
+                            p_a = clean_txt(comps[0].get("athlete", {}).get("displayName", ""))
+                            p_b = clean_txt(comps[1].get("athlete", {}).get("displayName", ""))
+                            if not p_a or not p_b or "/" in p_a or "TBD" in p_a:
                                 continue
-
+                            
                             p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
                             p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
                             m_id = f"MATCH_{tour}_{comp.get('id')}"
@@ -75,96 +69,72 @@ def sync_active_tournaments_and_rosters():
                             """, (m_id, t_id, tour, p_a_id, p_b_id, now_ts))
                             matches_queued += 1
         except Exception as e:
-            print(f"[SCRAPER ERROR] {tour} ingestion failure: {e}")
+            print(f"ESPN Error: {e}")
 
-    # 2. Ingest Ongoing ATP Challengers, ITF Circuits, and Davis Cup (TennisExplorer)
+    # 2. TennisExplorer (Challengers, ITF, Davis Cup)
     try:
-        print("[SCRAPER] Scanning ongoing Challengers and ITF circuit tournaments...")
-        te_url = "https://www.tennisexplorer.com/matches/"
-        res = requests.get(te_url, headers=HEADERS, timeout=12)
+        res = requests.get("https://www.tennisexplorer.com/matches/", headers=HEADERS, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            tables = soup.find_all("table", class_="result")
+            current_tourney = "World Tennis Tour"
+            tour_type = "ITF"
+            surface = "Hard"
 
-            for table in tables:
-                header = table.find("tr", class_="head")
-                if not header:
-                    continue
+            for tr in soup.find_all("tr"):
+                if "head" in tr.get("class", []):
+                    t_text = clean_txt(tr.get_text(" ", strip=True))
+                    if t_text:
+                        current_tourney = t_text
+                        nl = t_text.lower()
+                        tour_type = "CHALLENGER" if "challenger" in nl else ("DAVIS_CUP" if "davis" in nl else ("WTA" if "wta" in nl else "ITF"))
+                        surface = "Clay" if "clay" in nl else ("Grass" if "grass" in nl else "Hard")
+                
+                elif "t-name" in "".join(tr.get("class", [])) or tr.find("td", class_="t-name"):
+                    tds = tr.find_all("td")
+                    if len(tds) >= 2:
+                        # Find player name cells
+                        t_name_cells = tr.find_all("td", class_="t-name")
+                        if len(t_name_cells) >= 2:
+                            p_a = clean_txt(t_name_cells[0].get_text(strip=True))
+                            p_b = clean_txt(t_name_cells[1].get_text(strip=True))
+                            if not p_a or not p_b or "/" in p_a:
+                                continue
 
-                raw_t_name = clean_name(header.get_text(" ", strip=True))
-                if not raw_t_name:
-                    continue
+                            t_slug = re.sub(r'[^A-Z0-9_]', '', current_tourney.upper().replace(' ', '_'))[:30]
+                            t_id = f"{tour_type}_{t_slug}"
+                            cpi = 28.0 if surface == "Clay" else 38.0
+                            tournaments_discovered[t_id] = (t_id, current_tourney, tour_type, surface, cpi, 0, 15.0, 3)
 
-                # Classify tour level
-                name_lower = raw_t_name.lower()
-                if "challenger" in name_lower:
-                    tour_type = "CHALLENGER"
-                elif "itf" in name_lower or "futures" in name_lower or "m15" in name_lower or "w50" in name_lower or "w75" in name_lower:
-                    tour_type = "ITF"
-                elif "wta" in name_lower:
-                    tour_type = "WTA"
-                elif "davis" in name_lower:
-                    tour_type = "DAVIS_CUP"
-                else:
-                    tour_type = "ATP"
+                            p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
+                            p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
+                            m_id = f"MATCH_{t_slug[:6]}_{p_a_id[:6]}_{p_b_id[:6]}"
 
-                surface = "Clay" if "clay" in name_lower else ("Grass" if "grass" in name_lower else "Hard")
-                cpi = 28.0 if surface == "Clay" else (45.0 if surface == "Grass" else 36.0)
+                            players_discovered.add((p_a_id, p_a, tour_type))
+                            players_discovered.add((p_b_id, p_b, tour_type))
 
-                t_slug = re.sub(r'[^A-Z0-9_]', '', raw_t_name.upper().replace(' ', '_'))[:25]
-                t_id = f"{tour_type}_{t_slug}"
-
-                tournaments_discovered[t_id] = (t_id, raw_t_name, tour_type, surface, cpi, 0, 15.0, 3)
-
-                player_tds = table.find_all("td", class_="t-name")
-                for i in range(0, len(player_tds) - 1, 2):
-                    p_a = clean_name(player_tds[i].get_text(strip=True))
-                    p_b = clean_name(player_tds[i+1].get_text(strip=True))
-
-                    if not p_a or not p_b or "/" in p_a or "/" in p_b:
-                        continue
-
-                    p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
-                    p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
-                    m_id = f"MATCH_{t_slug[:6]}_{p_a_id[:8]}_{p_b_id[:8]}"
-
-                    players_discovered.add((p_a_id, p_a, tour_type))
-                    players_discovered.add((p_b_id, p_b, tour_type))
-
-                    c.execute("""
-                        INSERT OR REPLACE INTO Daily_Card (match_id, tournament_id, tour, player_a_id, player_b_id, temp_c, humidity_pct, status, created_at)
-                        VALUES (?, ?, ?, ?, ?, 24.0, 50.0, 'SCHEDULED', ?);
-                    """, (m_id, t_id, tour_type, p_a_id, p_b_id, now_ts))
-                    matches_queued += 1
-
+                            c.execute("""
+                                INSERT OR REPLACE INTO Daily_Card (match_id, tournament_id, tour, player_a_id, player_b_id, temp_c, humidity_pct, status, created_at)
+                                VALUES (?, ?, ?, ?, ?, 24.0, 50.0, 'SCHEDULED', ?);
+                            """, (m_id, t_id, tour_type, p_a_id, p_b_id, now_ts))
+                            matches_queued += 1
     except Exception as e:
-        print(f"[SCRAPER ERROR] Challenger/ITF retrieval failure: {e}")
+        print(f"TennisExplorer Error: {e}")
 
-    # 3. Commit Tournaments and Players
     for t_data in tournaments_discovered.values():
         c.execute("""
-            INSERT OR REPLACE INTO Tournaments 
-            (id, name, tour, surface, cpi, is_indoor, elevation_m, best_of)
+            INSERT OR REPLACE INTO Tournaments (id, name, tour, surface, cpi, is_indoor, elevation_m, best_of)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """, t_data)
 
-    # Insert new players; existing calibrated players will not be overwritten
     for p_id, p_name, p_tour in players_discovered:
         c.execute("""
-            INSERT OR IGNORE INTO Players 
-            (id, name, tour, handedness, backhand, serve_p, return_q, bp_save, bp_convert, topspin_rpm, sample_points, fatigue_hours_72h, rest_days, updated_at)
+            INSERT OR IGNORE INTO Players (id, name, tour, handedness, backhand, serve_p, return_q, bp_save, bp_convert, topspin_rpm, sample_points, fatigue_hours_72h, rest_days, updated_at)
             VALUES (?, ?, ?, 'R', '2H', 0.640, 0.360, 0.600, 0.400, 2700, 100, 0.0, 3, ?);
         """, (p_id, p_name, p_tour, now_ts))
 
     conn.commit()
     conn.close()
-
-    print("=======================================================")
-    print(f"  [DISCOVERY COMPLETE]")
-    print(f"  • Ongoing Tournaments Found : {len(tournaments_discovered)}")
-    print(f"  • Competing Players Found   : {len(players_discovered)}")
-    print(f"  • Scheduled Matchups Queued : {matches_queued}")
-    print("=======================================================")
+    print(f"[SUCCESS] Discovered {len(tournaments_discovered)} tournaments and queued {matches_queued} matches.")
 
 if __name__ == "__main__":
-    sync_active_tournaments_and_rosters()
+    sync_active_tournaments()
