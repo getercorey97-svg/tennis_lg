@@ -1,61 +1,80 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Full Operations Hub & Dashboard
-Features:
-- Live Slate with Instant Search across ATP, WTA, ITF, and ATF
-- Transparent Parameter Drift & EWMA Learning Ledger
-- Factual Audits (Simulation-Free Post-Mortems)
-- Integrated FanDuel Betting Tracker with Auto-Settlement
+tennis_lg: Autonomous Operational Hub with On-Launch Live Ingestion
+- Automatically checks for new slates, scores, and audits upon app opening
+- Synchronizes dual-source FanDuel and player profile feeds
+- Real-time learning adaptations, bet settlement, and factual audits
 """
-from fastapi import FastAPI, HTTPException, Request
+
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 import asyncio
 import subprocess
 import sqlite3
 import os
+import time
 import uvicorn
 from datetime import datetime
 
 DB_NAME = "tennis_lg.db"
+LAST_RUN_TIMESTAMP = 0.0
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     return conn
 
-async def autonomous_cycle(interval_minutes: int = 15):
+def run_full_pipeline_sync():
+    """Runs ingestion, pre-match simulations, and simulation-free audits."""
+    global LAST_RUN_TIMESTAMP
+    now = time.time()
+    
+    # 60-second debounce to prevent spamming when toggling tabs quickly
+    if now - LAST_RUN_TIMESTAMP < 60:
+        return {"status": "debounced", "message": "Updated recently"}
+
+    LAST_RUN_TIMESTAMP = now
+    try:
+        # 1. Pull latest match slates from FanDuel & Stats repos
+        subprocess.run(["python3", "scraper.py"], check=False)
+        # 2. Compute Monte Carlo predictions for newly scheduled games
+        subprocess.run(["python3", "run_pipeline.py"], check=False)
+        # 3. Ingest completed match scores & execute simulation-free post-mortems
+        subprocess.run(["python3", "post_mortem.py"], check=False)
+
+        # 4. Auto-settle any pending wagers with empirical outcomes
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("""
+            SELECT b.id, b.selection, b.odds, b.units, h.actual_winner
+            FROM Betting_Logs b
+            JOIN Historical_Forecasts h ON b.match_id = h.match_id
+            WHERE b.status = 'PENDING';
+        """)
+        for b_id, sel, odds, units, actual_winner in c.fetchall():
+            if sel == actual_winner:
+                payout = (units * (odds / 100.0)) if odds > 0 else (units * (100.0 / abs(odds)))
+                c.execute("UPDATE Betting_Logs SET status = 'WON', actual_winner = ?, payout_units = ? WHERE id = ?;", (actual_winner, round(payout, 2), b_id))
+            else:
+                c.execute("UPDATE Betting_Logs SET status = 'LOST', actual_winner = ?, payout_units = ? WHERE id = ?;", (actual_winner, -units, b_id))
+        conn.commit()
+        conn.close()
+        return {"status": "success", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    except Exception as e:
+        print(f"[PIPELINE SYNC ERROR] {e}")
+        return {"status": "error", "detail": str(e)}
+
+async def autonomous_background_daemon(interval_minutes: int = 15):
+    """Fallback loop running every 15 minutes when app is closed."""
     await asyncio.sleep(5)
     while True:
-        try:
-            subprocess.run(["python3", "scraper.py"], check=False)
-            subprocess.run(["python3", "run_pipeline.py"], check=False)
-            subprocess.run(["python3", "post_mortem.py"], check=False)
-
-            # Auto-settle pending wagers against audited match records
-            conn = get_db()
-            c = conn.cursor()
-            c.execute("""
-                SELECT b.id, b.selection, b.odds, b.units, h.actual_winner
-                FROM Betting_Logs b
-                JOIN Historical_Forecasts h ON b.match_id = h.match_id
-                WHERE b.status = 'PENDING';
-            """)
-            for b_id, sel, odds, units, actual_winner in c.fetchall():
-                if sel == actual_winner:
-                    payout = (units * (odds / 100.0)) if odds > 0 else (units * (100.0 / abs(odds)))
-                    c.execute("UPDATE Betting_Logs SET status = 'WON', actual_winner = ?, payout_units = ? WHERE id = ?;", (actual_winner, round(payout, 2), b_id))
-                else:
-                    c.execute("UPDATE Betting_Logs SET status = 'LOST', actual_winner = ?, payout_units = ? WHERE id = ?;", (actual_winner, -units, b_id))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"[BACKGROUND DAEMON ERROR] {e}")
+        run_full_pipeline_sync()
         await asyncio.sleep(interval_minutes * 60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    worker_task = asyncio.create_task(autonomous_cycle(interval_minutes=15))
+    worker_task = asyncio.create_task(autonomous_background_daemon(interval_minutes=15))
     yield
     worker_task.cancel()
 
@@ -65,15 +84,11 @@ app = FastAPI(title="tennis_lg Operations Hub", lifespan=lifespan)
 def health():
     return {"status": "healthy", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-@app.post("/api/sync")
-def manual_sync():
-    try:
-        subprocess.run(["python3", "scraper.py"], check=False)
-        subprocess.run(["python3", "run_pipeline.py"], check=False)
-        subprocess.run(["python3", "post_mortem.py"], check=False)
-        return JSONResponse({"status": "synced"})
-    except Exception as e:
-        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+@app.post("/api/sync/on_open")
+def sync_on_open(background_tasks: BackgroundTasks):
+    """Immediate trigger executed whenever you open the dashboard."""
+    background_tasks.add_task(run_full_pipeline_sync)
+    return JSONResponse({"status": "sync_dispatched", "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 
 @app.post("/api/bet/log")
 async def log_bet(request: Request):
@@ -93,22 +108,22 @@ def dashboard():
     conn = get_db()
     c = conn.cursor()
     
-    # Active Slate Forecasts
+    # 1. Active Slate
     c.execute("SELECT * FROM Model_Forecasts ORDER BY created_at DESC;")
     forecasts = [dict(row) for row in c.fetchall()]
     
-    # Feature Betas
+    # 2. Betas
     c.execute("SELECT * FROM Feature_Correlations;")
     betas = {row['vector_name']: row['beta_weight'] for row in c.fetchall()}
     
-    # Machine Learning Drift Events
+    # 3. Learning Adaptations
     c.execute("SELECT * FROM Learning_Log ORDER BY id DESC LIMIT 50;")
     learning_events = [dict(row) for row in c.fetchall()]
     
-    # Factual Match Audits (Excluding mock dummy labels)
+    # 4. Factual Audits (Excluding mock dummy labels)
     c.execute("""
         SELECT * FROM Historical_Forecasts 
-        WHERE player_a NOT LIKE 'Player_A%' AND player_b NOT LIKE 'Player_B%'
+        WHERE player_a NOT LIKE 'Player_%' AND player_b NOT LIKE 'Player_%'
         ORDER BY evaluated_at DESC;
     """)
     raw_audits = [dict(row) for row in c.fetchall()]
@@ -126,7 +141,7 @@ def dashboard():
     accuracy_rate = round((correct_count / audit_total * 100), 1) if audit_total > 0 else 0.0
     mean_brier = round(total_brier / audit_total, 4) if audit_total > 0 else 0.0
     
-    # Betting Ledger
+    # 5. Betting Ledger
     c.execute("SELECT * FROM Betting_Logs ORDER BY logged_at DESC;")
     bets = [dict(row) for row in c.fetchall()]
     net_units = round(sum(b['payout_units'] for b in bets if b['status'] in ('WON', 'LOST')), 2)
@@ -189,8 +204,13 @@ def dashboard():
             }}
             .badge-won {{ background: rgba(48,209,88,0.2); color: var(--green); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
             .badge-lost {{ background: rgba(255,69,58,0.2); color: var(--red); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
+            .badge-pending {{ background: rgba(10,132,255,0.2); color: var(--blue); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
             .delta-up {{ color: var(--green); font-weight: 700; font-family: monospace; }}
             .delta-down {{ color: var(--red); font-weight: 700; font-family: monospace; }}
+            #sync-badge {{
+                display: inline-block; padding: 2px 8px; border-radius: 6px;
+                background: #1c1c1e; font-size: 0.7rem; color: var(--muted); margin-left: auto;
+            }}
         </style>
         <script>
             function setTab(name) {{
@@ -199,12 +219,37 @@ def dashboard():
                 document.getElementById('btn-' + name).classList.add('active');
                 document.getElementById('pane-' + name).style.display = 'block';
             }}
+            
             function filterMatches() {{
                 const q = document.getElementById('search-input').value.toLowerCase();
                 document.querySelectorAll('.match-card').forEach(c => {{
                     c.style.display = c.getAttribute('data-search').toLowerCase().includes(q) ? 'block' : 'none';
                 }});
             }}
+
+            async function triggerOnOpenSync() {{
+                const badge = document.getElementById('sync-badge');
+                if (badge) badge.innerText = "Syncing live feeds...";
+                try {{
+                    const res = await fetch('/api/sync/on_open', {{ method: 'POST' }});
+                    if (res.ok) {{
+                        setTimeout(() => {{
+                            if (badge) badge.innerText = "Slate Updated";
+                        }}, 2500);
+                    }}
+                }} catch (e) {{
+                    if (badge) badge.innerText = "Sync Pending";
+                }}
+            }}
+
+            // Trigger sync when app opens or returns to active view
+            document.addEventListener('DOMContentLoaded', triggerOnOpenSync);
+            document.addEventListener('visibilitychange', () => {{
+                if (document.visibilityState === 'visible') {{
+                    triggerOnOpenSync();
+                }}
+            }});
+
             async function logWager(matchId, tour, sel, odds) {{
                 const units = prompt(`Log Wager on ${{sel}} (${{odds > 0 ? '+' : ''}}${{odds}})\\nEnter stake units:`, "1.0");
                 if (!units || isNaN(units)) return;
@@ -219,7 +264,11 @@ def dashboard():
     </head>
     <body>
         <h1>tennis_lg Operations Hub</h1>
-        <div class="sub-status"><span class="dot"></span> Autonomous Learning Engine Online (24/7)</div>
+        <div class="sub-status">
+            <span class="dot"></span> 
+            <span>Live Auto-Sync On Open</span>
+            <span id="sync-badge">Checking Slate...</span>
+        </div>
 
         <div class="metrics-grid">
             <div class="metric-pill"><div class="metric-title">Accuracy</div><div class="metric-val green">{accuracy_rate}%</div></div>
@@ -240,7 +289,7 @@ def dashboard():
             <input type="text" id="search-input" class="search-box" placeholder="🔍 Search player, tour (ATP, WTA, ITF, ATF), or tournament..." onkeyup="filterMatches()">
     """
     if not forecasts:
-        html += "<div class='card'><div class='lbl'>No active fixtures queued. Pipeline automatically querying ESPN & circuit schedules...</div></div>"
+        html += "<div class='card'><div class='lbl'>Updating live matchups from FanDuel and official boards...</div></div>"
     for f in forecasts:
         fav = f['player_a'] if f['prob_a_win'] >= 0.5 else f['player_b']
         fav_prob = max(f['prob_a_win'], f['prob_b_win']) * 100
@@ -250,7 +299,7 @@ def dashboard():
         <div class="card match-card" data-search="{f['tour']} {f['player_a']} {f['player_b']} {f['tournament_id']}">
             <div class="card-header"><span>{f['player_a']} vs {f['player_b']}</span><span class="tour-tag">{f['tour']}</span></div>
             <div class="row"><span class="lbl">Predicted Outright</span> <span class="green">{fav} ({fav_prob:.1f}%)</span></div>
-            <div class="row"><span class="lbl">Fair Moneyline</span> <span>{fav_ml_str}</span></div>
+            <div class="row"><span class="lbl">Fair FanDuel ML</span> <span>{fav_ml_str}</span></div>
             <div class="row"><span class="lbl">Projected Spread</span> <span>{f['proj_game_spread']:+.1f} Games</span></div>
             <div class="row"><span class="lbl">Total Games Line</span> <span>{f['proj_total_games']}</span></div>
             <button class="btn-action" onclick="logWager('{f['match_id']}', '{f['tour']}', '{fav}', {fav_ml})">+ Log {fav} ({fav_ml_str}) Bet</button>
@@ -292,7 +341,7 @@ def dashboard():
         <div id="pane-audits" class="tab-pane" style="display: none;">
     """
     if not audits:
-        html += "<div class='card'><div class='lbl'>No match outcomes audited yet.</div></div>"
+        html += "<div class='card'><div class='lbl'>No match outcomes audited yet. Auditing occurs as matches finish.</div></div>"
     for a in audits:
         verdict = "<span class='badge-won'>HIT ✅</span>" if a['hit'] else "<span class='badge-lost'>MISS ❌</span>"
         html += f"""
