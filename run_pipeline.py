@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-tennis_lg: Pre-Match Forecast Engine
-Clears outdated board predictions and generates fresh Monte Carlo runs for active fixtures.
-"""
-
 import sqlite3
 from engine import run_monte_carlo
 
@@ -18,11 +13,11 @@ def execute():
     fixtures = [dict(row) for row in c.fetchall()]
 
     if not fixtures:
-        print("[PIPELINE] No active fixtures scheduled on the board.")
+        print("[PIPELINE] No active fixtures currently scheduled.")
         conn.close()
         return
 
-    # Clear outdated model forecasts so the board displays only current games
+    # WIPE STALE BOARD PREDICTIONS
     c.execute("DELETE FROM Model_Forecasts;")
     
     print(f"[PIPELINE] Generating predictions for {len(fixtures)} live fixtures...")
@@ -46,7 +41,7 @@ def execute():
 
     conn.commit()
     conn.close()
-    print("[PIPELINE] Current slate successfully populated.")
+    print("[PIPELINE COMPLETE] Fresh slate predictions generated.")
 
 if __name__ == "__main__":
     execute()
