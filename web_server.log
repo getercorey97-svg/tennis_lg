@@ -1,6 +1,9 @@
 nohup: ignoring input
-INFO:     Started server process [21523]
+INFO:     Started server process [57468]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     71.143.145.101:0 - "GET / HTTP/1.1" 200 OK
+[SCRAPER] Fetching live ATP slate from ESPN...
+[SCRAPER] Fetching live WTA slate from ESPN...
+[SCRAPER] No live matches found on the ESPN slate today.
+[PIPELINE INFO] No scheduled fixtures pending.
