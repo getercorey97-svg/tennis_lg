@@ -1,9 +1,19 @@
 nohup: ignoring input
-INFO:     Started server process [57468]
+INFO:     Started server process [5013]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-[SCRAPER] Fetching live ATP slate from ESPN...
-[SCRAPER] Fetching live WTA slate from ESPN...
-[SCRAPER] No live matches found on the ESPN slate today.
-[PIPELINE INFO] No scheduled fixtures pending.
+[SCRAPER] Pulling live ATP schedule from public scoreboard...
+[SCRAPER] Pulling live WTA schedule from public scoreboard...
+[UNIFIED SCRAPER] Ingested 5 verified matches across ATP, WTA, ITF, and ATF tours.
+[PIPELINE] Processing 5 fixtures across ATP, WTA, ITF, and ATF...
+Traceback (most recent call last):
+  File "/workspaces/tennis_lg/run_pipeline.py", line 51, in <module>
+    execute_daily_card()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "/workspaces/tennis_lg/run_pipeline.py", line 28, in execute_daily_card
+    forecast = run_monte_carlo(fixture, iterations=3000)
+  File "/workspaces/tennis_lg/engine.py", line 95, in run_monte_carlo
+    t = dict(c.fetchone())
+TypeError: 'NoneType' object is not iterable
+[AUDITOR] All forecasts in database are audited and synchronized.

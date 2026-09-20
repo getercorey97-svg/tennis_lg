@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Full Operations & Learning Dashboard
+tennis_lg: Full Operations Hub & Dashboard
 Features:
-- Live Predictive Slate with Dynamic Search
-- Transparent Machine Learning Ledger (Beta drift & Player calibrations)
-- Factual Audits Ledger with Accuracy Metrics
-- One-Tap FanDuel Wager Logger & Performance Tracker
+- Live Slate with Instant Search across ATP, WTA, ITF, and ATF
+- Transparent Parameter Drift & EWMA Learning Ledger
+- Factual Audits (Simulation-Free Post-Mortems)
+- Integrated FanDuel Betting Tracker with Auto-Settlement
 """
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -24,34 +24,15 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_tables():
-    conn = get_db()
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS Betting_Logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        match_id TEXT, tour TEXT, selection TEXT, wager_type TEXT,
-        odds INTEGER, units REAL, status TEXT DEFAULT 'PENDING',
-        actual_winner TEXT, payout_units REAL DEFAULT 0.0, logged_at TEXT
-    );
-    """)
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS Learning_Log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT, parameter TEXT,
-        old_val REAL, new_val REAL, delta REAL, reason TEXT, updated_at TEXT
-    );
-    """)
-    conn.commit()
-    conn.close()
-
-async def autonomous_engine_cycle(interval_minutes: int = 15):
+async def autonomous_cycle(interval_minutes: int = 15):
     await asyncio.sleep(5)
     while True:
         try:
             subprocess.run(["python3", "scraper.py"], check=False)
             subprocess.run(["python3", "run_pipeline.py"], check=False)
             subprocess.run(["python3", "post_mortem.py"], check=False)
-            
-            # Settle pending wagers automatically
+
+            # Auto-settle pending wagers against audited match records
             conn = get_db()
             c = conn.cursor()
             c.execute("""
@@ -69,17 +50,16 @@ async def autonomous_engine_cycle(interval_minutes: int = 15):
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"[DAEMON ERROR] {e}")
+            print(f"[BACKGROUND DAEMON ERROR] {e}")
         await asyncio.sleep(interval_minutes * 60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_tables()
-    worker_task = asyncio.create_task(autonomous_engine_cycle(interval_minutes=15))
+    worker_task = asyncio.create_task(autonomous_cycle(interval_minutes=15))
     yield
     worker_task.cancel()
 
-app = FastAPI(title="tennis_lg Operational Hub", lifespan=lifespan)
+app = FastAPI(title="tennis_lg Operations Hub", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -110,40 +90,43 @@ async def log_bet(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    init_tables()
     conn = get_db()
     c = conn.cursor()
     
-    # Active Predictions
+    # Active Slate Forecasts
     c.execute("SELECT * FROM Model_Forecasts ORDER BY created_at DESC;")
     forecasts = [dict(row) for row in c.fetchall()]
     
-    # Current Betas
+    # Feature Betas
     c.execute("SELECT * FROM Feature_Correlations;")
     betas = {row['vector_name']: row['beta_weight'] for row in c.fetchall()}
     
-    # Learning Adaptations Ledger
+    # Machine Learning Drift Events
     c.execute("SELECT * FROM Learning_Log ORDER BY id DESC LIMIT 50;")
     learning_events = [dict(row) for row in c.fetchall()]
     
-    # Historical Audits
-    c.execute("SELECT * FROM Historical_Forecasts ORDER BY evaluated_at DESC;")
+    # Factual Match Audits (Excluding mock dummy labels)
+    c.execute("""
+        SELECT * FROM Historical_Forecasts 
+        WHERE player_a NOT LIKE 'Player_A%' AND player_b NOT LIKE 'Player_B%'
+        ORDER BY evaluated_at DESC;
+    """)
     raw_audits = [dict(row) for row in c.fetchall()]
     audits = []
     correct_count = 0
     total_brier = 0.0
     for a in raw_audits:
-        pred_winner = a['player_a'] if a['prob_a_win'] >= a['prob_b_win'] else a['player_b']
-        hit = (pred_winner == a['actual_winner'])
+        pred = a['player_a'] if a['prob_a_win'] >= a['prob_b_win'] else a['player_b']
+        hit = (pred == a['actual_winner'])
         if hit: correct_count += 1
         total_brier += a['brier_score']
-        audits.append({**a, "predicted_winner": pred_winner, "hit": hit})
+        audits.append({**a, "predicted_winner": pred, "hit": hit})
     
     audit_total = len(audits)
     accuracy_rate = round((correct_count / audit_total * 100), 1) if audit_total > 0 else 0.0
     mean_brier = round(total_brier / audit_total, 4) if audit_total > 0 else 0.0
     
-    # Bets & P/L
+    # Betting Ledger
     c.execute("SELECT * FROM Betting_Logs ORDER BY logged_at DESC;")
     bets = [dict(row) for row in c.fetchall()]
     net_units = round(sum(b['payout_units'] for b in bets if b['status'] in ('WON', 'LOST')), 2)
@@ -206,7 +189,6 @@ def dashboard():
             }}
             .badge-won {{ background: rgba(48,209,88,0.2); color: var(--green); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
             .badge-lost {{ background: rgba(255,69,58,0.2); color: var(--red); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
-            .badge-pending {{ background: rgba(10,132,255,0.2); color: var(--blue); padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 800; }}
             .delta-up {{ color: var(--green); font-weight: 700; font-family: monospace; }}
             .delta-down {{ color: var(--red); font-weight: 700; font-family: monospace; }}
         </style>
@@ -224,7 +206,7 @@ def dashboard():
                 }});
             }}
             async function logWager(matchId, tour, sel, odds) {{
-                const units = prompt(`Log Wager on ${{sel}} (${{odds > 0 ? '+' : ''}}${{odds}})\\nEnter stake (units):`, "1.0");
+                const units = prompt(`Log Wager on ${{sel}} (${{odds > 0 ? '+' : ''}}${{odds}})\\nEnter stake units:`, "1.0");
                 if (!units || isNaN(units)) return;
                 await fetch('/api/bet/log', {{
                     method: 'POST',
@@ -253,12 +235,12 @@ def dashboard():
             <button id="btn-bets" class="tab-btn" onclick="setTab('bets')">Betting Log ({len(bets)})</button>
         </div>
 
-        <!-- TAB 1: PREDICTIONS -->
+        <!-- TAB 1: PREDICTIONS SLATE -->
         <div id="pane-slate" class="tab-pane">
-            <input type="text" id="search-input" class="search-box" placeholder="🔍 Search player or tournament..." onkeyup="filterMatches()">
+            <input type="text" id="search-input" class="search-box" placeholder="🔍 Search player, tour (ATP, WTA, ITF, ATF), or tournament..." onkeyup="filterMatches()">
     """
     if not forecasts:
-        html += "<div class='card'><div class='lbl'>No pending matches queued. Background scraper polling active slate...</div></div>"
+        html += "<div class='card'><div class='lbl'>No active fixtures queued. Pipeline automatically querying ESPN & circuit schedules...</div></div>"
     for f in forecasts:
         fav = f['player_a'] if f['prob_a_win'] >= 0.5 else f['player_b']
         fav_prob = max(f['prob_a_win'], f['prob_b_win']) * 100
@@ -267,20 +249,20 @@ def dashboard():
         html += f"""
         <div class="card match-card" data-search="{f['tour']} {f['player_a']} {f['player_b']} {f['tournament_id']}">
             <div class="card-header"><span>{f['player_a']} vs {f['player_b']}</span><span class="tour-tag">{f['tour']}</span></div>
-            <div class="row"><span class="lbl">Model Pick</span> <span class="green">{fav} ({fav_prob:.1f}%)</span></div>
+            <div class="row"><span class="lbl">Predicted Outright</span> <span class="green">{fav} ({fav_prob:.1f}%)</span></div>
             <div class="row"><span class="lbl">Fair Moneyline</span> <span>{fav_ml_str}</span></div>
             <div class="row"><span class="lbl">Projected Spread</span> <span>{f['proj_game_spread']:+.1f} Games</span></div>
-            <div class="row"><span class="lbl">Total Games O/U</span> <span>{f['proj_total_games']}</span></div>
+            <div class="row"><span class="lbl">Total Games Line</span> <span>{f['proj_total_games']}</span></div>
             <button class="btn-action" onclick="logWager('{f['match_id']}', '{f['tour']}', '{fav}', {fav_ml})">+ Log {fav} ({fav_ml_str}) Bet</button>
         </div>
         """
     html += f"""
         </div>
 
-        <!-- TAB 2: LEARNING LEDGER (PARAMETER DRIFT & EWMA ADAPTATIONS) -->
+        <!-- TAB 2: LEARNING LEDGER -->
         <div id="pane-learning" class="tab-pane" style="display: none;">
             <div class="card">
-                <div class="card-header"><span>Active Learned Betas (Weights)</span></div>
+                <div class="card-header"><span>Learned Correlation Weights (β)</span></div>
                 <div class="row"><span class="lbl">Physics Vector</span> <span style="font-family: monospace;">{betas.get('v_physics', 1.0):.4f}</span></div>
                 <div class="row"><span class="lbl">Thermo Vector</span> <span style="font-family: monospace;">{betas.get('v_thermo', 1.0):.4f}</span></div>
                 <div class="row"><span class="lbl">Fatigue/Bio Vector</span> <span style="font-family: monospace;">{betas.get('v_bio', 1.0):.4f}</span></div>
@@ -288,7 +270,7 @@ def dashboard():
             </div>
     """
     if not learning_events:
-        html += "<div class='card'><div class='lbl'>Awaiting official match completions to trigger parameter calibration.</div></div>"
+        html += "<div class='card'><div class='lbl'>Parameter updates record here dynamically upon completed match audits.</div></div>"
     for e in learning_events:
         delta_class = "delta-up" if e['delta'] >= 0 else "delta-down"
         arrow = "▲" if e['delta'] >= 0 else "▼"
@@ -299,8 +281,8 @@ def dashboard():
                 <span class="{delta_class}">{arrow} {e['delta']:+.4f}</span>
             </div>
             <div class="row"><span class="lbl">Parameter Shift</span> <span>{e['old_val']:.4f} → {e['new_val']:.4f}</span></div>
-            <div class="row"><span class="lbl">Trigger Cause</span> <span style="font-size: 0.8rem;">{e['reason']}</span></div>
-            <div class="row"><span class="lbl">Calibrated At</span> <span style="font-family: monospace; font-size: 0.75rem;">{e['updated_at']}</span></div>
+            <div class="row"><span class="lbl">Evaluation Context</span> <span style="font-size: 0.8rem;">{e['reason']}</span></div>
+            <div class="row"><span class="lbl">Timestamp</span> <span style="font-family: monospace; font-size: 0.75rem;">{e['updated_at']}</span></div>
         </div>
         """
     html += f"""
@@ -310,7 +292,7 @@ def dashboard():
         <div id="pane-audits" class="tab-pane" style="display: none;">
     """
     if not audits:
-        html += "<div class='card'><div class='lbl'>No match outcomes audited yet. Auditing occurs on match completion.</div></div>"
+        html += "<div class='card'><div class='lbl'>No match outcomes audited yet.</div></div>"
     for a in audits:
         verdict = "<span class='badge-won'>HIT ✅</span>" if a['hit'] else "<span class='badge-lost'>MISS ❌</span>"
         html += f"""
@@ -329,23 +311,23 @@ def dashboard():
         <!-- TAB 4: BETTING LOGS -->
         <div id="pane-bets" class="tab-pane" style="display: none;">
             <div class="card">
-                <div class="card-header"><span>Betting Record</span> <span class="green">{bet_win_rate}% Win Rate</span></div>
-                <div class="row"><span class="lbl">Settled Wagers</span> <span>{resolved_bets}</span></div>
-                <div class="row"><span class="lbl">Pending Wagers</span> <span>{len(bets) - resolved_bets}</span></div>
+                <div class="card-header"><span>Performance</span> <span class="green">{bet_win_rate}% Win Rate</span></div>
+                <div class="row"><span class="lbl">Settled</span> <span>{resolved_bets}</span></div>
+                <div class="row"><span class="lbl">Pending</span> <span>{len(bets) - resolved_bets}</span></div>
                 <div class="row"><span class="lbl">Net Return</span> <span class="{'green' if net_units >= 0 else 'red'}">{net_units:+.2f}u</span></div>
             </div>
     """
     if not bets:
         html += "<div class='card'><div class='lbl'>No bets logged yet. Use '+ Log Bet' on any active prediction.</div></div>"
     for b in bets:
-        status_tag = f"<span class='badge-{b['status'].lower()}'>{b['status']}</span>"
+        status_tag = f"<span class='badge-{'won' if b['status'] == 'WON' else ('lost' if b['status'] == 'LOST' else 'pending')}'>{b['status']}</span>"
         payout = f"{b['payout_units']:+.2f}u" if b['status'] in ('WON', 'LOST') else "In Play"
         html += f"""
         <div class="card">
             <div class="card-header"><span>{b['selection']} ({'+' if b['odds'] > 0 else ''}{b['odds']})</span>{status_tag}</div>
             <div class="row"><span class="lbl">Tour / Type</span> <span>{b['tour']} • {b['wager_type']}</span></div>
             <div class="row"><span class="lbl">Stake Risked</span> <span>{b['units']} units</span></div>
-            <div class="row"><span class="lbl">Net P/L</span> <span class="{'green' if b['payout_units'] > 0 else ('red' if b['payout_units'] < 0 else '')}">{payout}</span></div>
+            <div class="row"><span class="lbl">Net Result</span> <span class="{'green' if b['payout_units'] > 0 else ('red' if b['payout_units'] < 0 else '')}">{payout}</span></div>
             <div class="row"><span class="lbl">Logged Time</span> <span style="font-family: monospace; font-size: 0.75rem;">{b['logged_at']}</span></div>
         </div>
         """
