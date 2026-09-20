@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Multi-Tour Ingestion Engine
-Correctly maps official tournament titles, surfaces, and active matches.
+tennis_lg: Precise Live Ingestion Engine
+Accurately extracts real player names and separates tournament headers.
 """
 
 import sqlite3
@@ -29,7 +29,9 @@ def sync_active_tournaments():
     c = conn.cursor()
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+    # Clear outdated fixtures and faulty placeholder forecasts
     c.execute("DELETE FROM Daily_Card WHERE status = 'SCHEDULED';")
+    c.execute("DELETE FROM Model_Forecasts;")
 
     tournaments_discovered = {}
     players_discovered = set()
@@ -53,7 +55,7 @@ def sync_active_tournaments():
                         if len(comps) == 2:
                             p_a = clean_txt(comps[0].get("athlete", {}).get("displayName", ""))
                             p_b = clean_txt(comps[1].get("athlete", {}).get("displayName", ""))
-                            if not p_a or not p_b or "/" in p_a or "TBD" in p_a:
+                            if not p_a or not p_b or "/" in p_a or "TBD" in p_a or len(p_a) < 3 or len(p_b) < 3:
                                 continue
                             
                             p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
@@ -71,7 +73,7 @@ def sync_active_tournaments():
         except Exception as e:
             print(f"ESPN Error: {e}")
 
-    # 2. TennisExplorer (Challengers, ITF, Davis Cup)
+    # 2. TennisExplorer Parser (Strict Player Validation)
     try:
         res = requests.get("https://www.tennisexplorer.com/matches/", headers=HEADERS, timeout=10)
         if res.status_code == 200:
@@ -80,43 +82,45 @@ def sync_active_tournaments():
             tour_type = "ITF"
             surface = "Hard"
 
-            for tr in soup.find_all("tr"):
-                if "head" in tr.get("class", []):
-                    t_text = clean_txt(tr.get_text(" ", strip=True))
-                    if t_text:
+            for table in soup.find_all("table", class_="result"):
+                head = table.find("tr", class_="head")
+                if head:
+                    t_text = clean_txt(head.get_text(" ", strip=True))
+                    if t_text and len(t_text) > 2:
                         current_tourney = t_text
                         nl = t_text.lower()
                         tour_type = "CHALLENGER" if "challenger" in nl else ("DAVIS_CUP" if "davis" in nl else ("WTA" if "wta" in nl else "ITF"))
                         surface = "Clay" if "clay" in nl else ("Grass" if "grass" in nl else "Hard")
-                
-                elif "t-name" in "".join(tr.get("class", [])) or tr.find("td", class_="t-name"):
-                    tds = tr.find_all("td")
-                    if len(tds) >= 2:
-                        # Find player name cells
-                        t_name_cells = tr.find_all("td", class_="t-name")
-                        if len(t_name_cells) >= 2:
-                            p_a = clean_txt(t_name_cells[0].get_text(strip=True))
-                            p_b = clean_txt(t_name_cells[1].get_text(strip=True))
-                            if not p_a or not p_b or "/" in p_a:
-                                continue
 
-                            t_slug = re.sub(r'[^A-Z0-9_]', '', current_tourney.upper().replace(' ', '_'))[:30]
-                            t_id = f"{tour_type}_{t_slug}"
-                            cpi = 28.0 if surface == "Clay" else 38.0
-                            tournaments_discovered[t_id] = (t_id, current_tourney, tour_type, surface, cpi, 0, 15.0, 3)
+                for row in table.find_all("tr"):
+                    t_name_cells = row.find_all("td", class_="t-name")
+                    if len(t_name_cells) >= 2:
+                        p_a = clean_txt(t_name_cells[0].get_text(strip=True))
+                        p_b = clean_txt(t_name_cells[1].get_text(strip=True))
+                        
+                        # Filter out invalid headers or short strings
+                        if not p_a or not p_b or "/" in p_a or len(p_a) < 3 or len(p_b) < 3:
+                            continue
+                        if "vs" in p_a.lower() or "tournament" in p_a.lower() or "cup" in p_a.lower():
+                            continue
 
-                            p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
-                            p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
-                            m_id = f"MATCH_{t_slug[:6]}_{p_a_id[:6]}_{p_b_id[:6]}"
+                        t_slug = re.sub(r'[^A-Z0-9_]', '', current_tourney.upper().replace(' ', '_'))[:30]
+                        t_id = f"{tour_type}_{t_slug}"
+                        cpi = 28.0 if surface == "Clay" else 38.0
+                        tournaments_discovered[t_id] = (t_id, current_tourney, tour_type, surface, cpi, 0, 15.0, 3)
 
-                            players_discovered.add((p_a_id, p_a, tour_type))
-                            players_discovered.add((p_b_id, p_b, tour_type))
+                        p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
+                        p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
+                        m_id = f"MATCH_{t_slug[:6]}_{p_a_id[:6]}_{p_b_id[:6]}"
 
-                            c.execute("""
-                                INSERT OR REPLACE INTO Daily_Card (match_id, tournament_id, tour, player_a_id, player_b_id, temp_c, humidity_pct, status, created_at)
-                                VALUES (?, ?, ?, ?, ?, 24.0, 50.0, 'SCHEDULED', ?);
-                            """, (m_id, t_id, tour_type, p_a_id, p_b_id, now_ts))
-                            matches_queued += 1
+                        players_discovered.add((p_a_id, p_a, tour_type))
+                        players_discovered.add((p_b_id, p_b, tour_type))
+
+                        c.execute("""
+                            INSERT OR REPLACE INTO Daily_Card (match_id, tournament_id, tour, player_a_id, player_b_id, temp_c, humidity_pct, status, created_at)
+                            VALUES (?, ?, ?, ?, ?, 24.0, 50.0, 'SCHEDULED', ?);
+                        """, (m_id, t_id, tour_type, p_a_id, p_b_id, now_ts))
+                        matches_queued += 1
     except Exception as e:
         print(f"TennisExplorer Error: {e}")
 
@@ -134,7 +138,7 @@ def sync_active_tournaments():
 
     conn.commit()
     conn.close()
-    print(f"[SUCCESS] Discovered {len(tournaments_discovered)} tournaments and queued {matches_queued} matches.")
+    print(f"[SUCCESS] Discovered {len(tournaments_discovered)} tournaments and queued {matches_queued} clean matches.")
 
 if __name__ == "__main__":
     sync_active_tournaments()
