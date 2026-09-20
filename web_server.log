@@ -1,27 +1,8 @@
 nohup: ignoring input
-INFO:     Started server process [4931]
+INFO:     Started server process [2199]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-[SCRAPER] Scanning active ATP tournaments on ESPN...
-[SCRAPER] Scanning active WTA tournaments on ESPN...
-[SCRAPER] Scanning ongoing Challengers and ITF circuit tournaments...
-=======================================================
-  [DISCOVERY COMPLETE]
-  • Ongoing Tournaments Found : 4
-  • Competing Players Found   : 751
-  • Scheduled Matchups Queued : 389
-=======================================================
-[PIPELINE] Generating predictions for 387 live fixtures...
-[PIPELINE COMPLETE] Fresh slate predictions generated.
-[SCRAPER] Scanning active ATP tournaments on ESPN...
-[SCRAPER] Scanning active WTA tournaments on ESPN...
-[SCRAPER] Scanning ongoing Challengers and ITF circuit tournaments...
-=======================================================
-  [DISCOVERY COMPLETE]
-  • Ongoing Tournaments Found : 4
-  • Competing Players Found   : 749
-  • Scheduled Matchups Queued : 388
-=======================================================
-[PIPELINE] Generating predictions for 386 live fixtures...
-[PIPELINE COMPLETE] Fresh slate predictions generated.
+[SUCCESS] Discovered 0 tournaments and queued 0 clean matches.
+[PIPELINE] No active fixtures currently scheduled.
+[AUDITOR] No pending unaudited matches in database.
