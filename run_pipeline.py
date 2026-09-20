@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Pre-Match Execution Pipeline
-Pulls active matches from Daily_Card and computes Monte Carlo projections.
+tennis_lg: Pre-Match Monte Carlo Prediction Pipeline
+Simulates outcomes exclusively for verified fixtures in Daily_Card.
 """
 
 import sqlite3
@@ -9,23 +9,22 @@ from engine import run_monte_carlo
 
 DB_NAME = "tennis_lg.db"
 
-def execute_daily_card():
+def execute():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
     c.execute("SELECT * FROM Daily_Card WHERE status = 'SCHEDULED';")
-    scheduled_matches = [dict(row) for row in c.fetchall()]
+    fixtures = [dict(row) for row in c.fetchall()]
 
-    if not scheduled_matches:
-        print("[PIPELINE] No scheduled fixtures pending simulation.")
+    if not fixtures:
+        print("[PIPELINE] No active fixtures scheduled on the board today.")
         conn.close()
         return
 
-    print(f"[PIPELINE] Processing {len(scheduled_matches)} fixtures across ATP, WTA, ITF, and ATF...")
-    
-    for fixture in scheduled_matches:
-        forecast = run_monte_carlo(fixture, iterations=3000)
+    print(f"[PIPELINE] Simulating {len(fixtures)} real fixtures from Daily_Card...")
+    for fix in fixtures:
+        forecast = run_monte_carlo(fix, iterations=3500)
         c.execute("""
             INSERT OR REPLACE INTO Model_Forecasts (
                 match_id, tournament_id, tour, player_a, player_b,
@@ -41,11 +40,11 @@ def execute_daily_card():
             forecast['v_thermo'], forecast['v_bio'], forecast['v_variance'],
             forecast['net_edge'], forecast['created_at']
         ))
-        print(f"  ✓ Model: {forecast['player_a']} ({forecast['prob_a_win']*100:.1f}%) vs {forecast['player_b']} ({forecast['prob_b_win']*100:.1f}%) [{forecast['tour']}]")
+        print(f"  • Forecasted: {forecast['player_a']} ({forecast['prob_a_win']*100:.1f}%) vs {forecast['player_b']} ({forecast['prob_b_win']*100:.1f}%)")
 
     conn.commit()
     conn.close()
-    print("[PIPELINE COMPLETE] Generated forecasts saved to database.")
+    print("[PIPELINE] All real slate simulations completed.")
 
 if __name__ == "__main__":
-    execute_daily_card()
+    execute()
