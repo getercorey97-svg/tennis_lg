@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Multi-Tour Operations Hub
-- Groups matches cleanly by active tournament
-- Provides dedicated 'Active Tournaments' view with participant rosters
-- Dynamic auto-sync and wager settlement
+tennis_lg: State-of-the-Art Quantitative Tennis Engine & Operations Hub
+- Edge Detection & Fractional Kelly Criterion Staking
+- Geter Principle Vector Decomposition (Physics, Thermo, Bio, Variance)
+- Mobile-First Quantitative UI with Multi-Tour Filtering
+- Autonomous 24/7 Lifespan & Live Sync on Open
 """
 
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -15,6 +16,7 @@ import subprocess
 import sqlite3
 import os
 import time
+import math
 import uvicorn
 from datetime import datetime
 
@@ -25,6 +27,34 @@ def get_db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     return conn
+
+def calculate_ev_and_kelly(prob: float, american_odds: int, bankroll: float = 1000.0, kelly_fraction: float = 0.25):
+    """
+    Computes Expected Value (EV%) and Recommended Units via Fractional Kelly Criterion.
+    """
+    if american_odds > 0:
+        b = american_odds / 100.0
+    else:
+        b = 100.0 / abs(american_odds)
+
+    # EV = (Probability * Decimal Profit) - (1 - Probability)
+    ev = (prob * b) - (1.0 - prob)
+    ev_pct = round(ev * 100.0, 2)
+
+    # Kelly Criterion: f* = (bp - q) / b
+    q = 1.0 - prob
+    if b > 0:
+        f_star = (b * prob - q) / b
+    else:
+        f_star = 0.0
+
+    # Apply quarter-kelly fractional cap (max 3.0 units)
+    if f_star > 0 and ev > 0:
+        recommended_units = round(min(3.0, max(0.25, f_star * kelly_fraction * 10.0)), 2)
+    else:
+        recommended_units = 0.0
+
+    return ev_pct, recommended_units
 
 def execute_pipeline_refresh():
     global LAST_RUN
@@ -37,7 +67,7 @@ def execute_pipeline_refresh():
         subprocess.run(["python3", "run_pipeline.py"], check=False)
         subprocess.run(["python3", "post_mortem.py"], check=False)
     except Exception as e:
-        print(f"[SYNC ERROR] {e}")
+        print(f"[PIPELINE SYNC ERROR] {e}")
 
 async def background_loop():
     await asyncio.sleep(5)
@@ -51,7 +81,7 @@ async def lifespan(app: FastAPI):
     yield
     worker.cancel()
 
-app = FastAPI(title="tennis_lg Operations Hub", lifespan=lifespan)
+app = FastAPI(title="tennis_lg Quant Engine", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -80,38 +110,62 @@ def dashboard():
     conn = get_db()
     c = conn.cursor()
 
-    # 1. Matches with Tournament Metadata
+    # 1. Fetch Model Forecasts with Tournament Surfaces
     c.execute("""
         SELECT f.*, COALESCE(t.name, f.tournament_id) as tourney_name, COALESCE(t.surface, 'Hard') as tourney_surface
         FROM Model_Forecasts f
         LEFT JOIN Tournaments t ON f.tournament_id = t.id
         ORDER BY t.name ASC, f.created_at DESC;
     """)
-    forecasts = [dict(row) for row in c.fetchall()]
+    raw_forecasts = [dict(row) for row in c.fetchall()]
 
-    # Group matches by tournament
+    forecasts = []
     grouped_matches = defaultdict(list)
-    for f in forecasts:
-        grouped_matches[(f['tourney_name'], f['tour'], f['tourney_surface'])].append(f)
+    for f in raw_forecasts:
+        # Determine favorite and underdog
+        is_a_fav = f['prob_a_win'] >= f['prob_b_win']
+        fav = f['player_a'] if is_a_fav else f['player_b']
+        und = f['player_b'] if is_a_fav else f['player_a']
+        fav_prob = max(f['prob_a_win'], f['prob_b_win'])
+        und_prob = min(f['prob_a_win'], f['prob_b_win'])
+        fav_ml = f['american_ml_a'] if is_a_fav else f['american_ml_b']
+        und_ml = f['american_ml_b'] if is_a_fav else f['american_ml_a']
 
-    # 2. Active Tournaments List with Active Player Counts
+        # Quantitative Metrics
+        ev_pct, kelly_units = calculate_ev_and_kelly(fav_prob, fav_ml)
+
+        match_data = {
+            **f,
+            'fav': fav,
+            'und': und,
+            'fav_prob_pct': round(fav_prob * 100, 1),
+            'und_prob_pct': round(und_prob * 100, 1),
+            'fav_ml_str': f"+{fav_ml}" if fav_ml > 0 else str(fav_ml),
+            'und_ml_str': f"+{und_ml}" if und_ml > 0 else str(und_ml),
+            'ev_pct': ev_pct,
+            'kelly_units': kelly_units
+        }
+        forecasts.append(match_data)
+        grouped_matches[(f['tourney_name'], f['tour'], f['tourney_surface'])].append(match_data)
+
+    # 2. Active Tournaments
     c.execute("""
         SELECT t.id, t.name, t.tour, t.surface, COUNT(d.match_id) as match_count
         FROM Tournaments t
         JOIN Daily_Card d ON t.id = d.tournament_id
         GROUP BY t.id
-        ORDER BY t.name ASC;
+        ORDER BY match_count DESC;
     """)
     active_tourneys = [dict(row) for row in c.fetchall()]
 
-    # 3. Model Weights & Learning Logs
+    # 3. Model Weights & Drift
     c.execute("SELECT * FROM Feature_Correlations;")
     betas = {row['vector_name']: row['beta_weight'] for row in c.fetchall()}
     
     c.execute("SELECT * FROM Learning_Log ORDER BY id DESC LIMIT 50;")
     learning_events = [dict(row) for row in c.fetchall()]
 
-    # 4. Factual Audits (Excluding mock dummy records)
+    # 4. Factual Audits Ledger
     c.execute("SELECT * FROM Historical_Forecasts WHERE player_a NOT LIKE 'Player_%' ORDER BY evaluated_at DESC LIMIT 500;")
     raw_audits = [dict(row) for row in c.fetchall()]
     audits = []
@@ -128,7 +182,7 @@ def dashboard():
     accuracy_rate = round((correct_count / audit_total * 100), 1) if audit_total > 0 else 0.0
     mean_brier = round(total_brier / audit_total, 4) if audit_total > 0 else 0.0
 
-    # 5. Betting Performance
+    # 5. Betting Ledger
     c.execute("SELECT * FROM Betting_Logs ORDER BY logged_at DESC;")
     bets = [dict(row) for row in c.fetchall()]
     net_units = round(sum(b['payout_units'] for b in bets if b['status'] in ('WON', 'LOST')), 2)
@@ -143,50 +197,95 @@ def dashboard():
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0, viewport-fit=cover">
-        <meta name="theme-color" content="#000000">
-        <title>tennis_lg | Operations Hub</title>
+        <meta name="theme-color" content="#0a0a0c">
+        <title>tennis_lg | Predictive Quantitative Engine</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
         <style>
             :root {{
-                --bg: #000000;
-                --card: #121212;
-                --text: #f5f5f7;
-                --muted: #8e8e93;
-                --blue: #0a84ff;
-                --green: #30d158;
-                --red: #ff453a;
-                --purple: #bf5af2;
-                --border: #2c2c2e;
+                --bg: #090a0f;
+                --surface: #12131a;
+                --surface-hover: #191b24;
+                --border: #232634;
+                --text-main: #f8fafc;
+                --text-muted: #828a9e;
+                --accent-blue: #3b82f6;
+                --accent-cyan: #06b6d4;
+                --accent-green: #10b981;
+                --accent-red: #ef4444;
+                --accent-purple: #8b5cf6;
+                --accent-amber: #f59e0b;
             }}
-            * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; font-family: system-ui, -apple-system, sans-serif; }}
-            body {{ background: var(--bg); color: var(--text); margin: 0; padding: 16px 16px 80px 16px; }}
-            h1 {{ font-size: 1.3rem; margin: 16px 0 4px 0; font-weight: 800; }}
-            .sub-status {{ font-size: 0.75rem; color: var(--muted); font-family: monospace; display: flex; align-items: center; gap: 6px; margin-bottom: 16px; }}
-            .dot {{ width: 8px; height: 8px; background: var(--green); border-radius: 50%; }}
-            .tabs {{ display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; }}
-            .tab-btn {{ background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 10px 14px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; white-space: nowrap; }}
-            .tab-btn.active {{ background: var(--blue); color: white; border-color: var(--blue); }}
-            .search-box {{ width: 100%; background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 12px 14px; border-radius: 14px; font-size: 0.95rem; margin-bottom: 14px; outline: none; }}
-            .metrics-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 18px; }}
-            .metric-pill {{ background: var(--card); border: 1px solid var(--border); padding: 10px 6px; border-radius: 12px; text-align: center; }}
-            .metric-title {{ font-size: 0.65rem; color: var(--muted); font-weight: 700; text-transform: uppercase; }}
-            .metric-val {{ font-size: 1rem; font-weight: 800; margin-top: 4px; font-family: monospace; }}
+            * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }}
+            body {{ background: var(--bg); color: var(--text-main); padding: 16px 16px 90px 16px; min-height: 100vh; }}
             
-            .tourney-banner {{
-                background: #1c1c1e; border: 1px solid var(--border); border-left: 4px solid var(--blue);
-                padding: 10px 14px; border-radius: 12px; margin: 20px 0 10px 0; display: flex; justify-content: space-between; align-items: center;
-            }}
-            .tourney-title {{ font-size: 0.95rem; font-weight: 800; color: var(--text); }}
-            .tourney-badge {{ font-size: 0.65rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; background: var(--purple); color: white; }}
-            .surface-tag {{ font-size: 0.7rem; color: var(--muted); margin-left: 6px; }}
+            /* Header */
+            .header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }}
+            .brand-title {{ font-size: 1.35rem; font-weight: 800; letter-spacing: -0.5px; background: linear-gradient(135deg, #fff 40%, var(--accent-cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
+            .brand-sub {{ font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 3px; display: flex; align-items: center; gap: 6px; }}
+            .status-dot {{ width: 7px; height: 7px; background: var(--accent-green); border-radius: 50%; box-shadow: 0 0 10px var(--accent-green); }}
 
-            .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 14px; margin-bottom: 10px; }}
-            .card-header {{ display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 0.95rem; margin-bottom: 8px; }}
-            .row {{ display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.88rem; }}
-            .row:last-of-type {{ border-bottom: none; }}
-            .lbl {{ color: var(--muted); }}
-            .green {{ color: var(--green); font-weight: 700; }}
-            .red {{ color: var(--red); font-weight: 700; }}
-            .btn-action {{ width: 100%; background: #1f2937; border: 1px solid #374151; color: var(--text); padding: 10px; border-radius: 12px; font-weight: 700; font-size: 0.85rem; margin-top: 10px; cursor: pointer; }}
+            /* Quantitative Stats Bar */
+            .metrics-strip {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 18px; }}
+            .metric-box {{ background: var(--surface); border: 1px solid var(--border); padding: 10px 8px; border-radius: 12px; text-align: center; }}
+            .metric-label {{ font-size: 0.65rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }}
+            .metric-value {{ font-size: 1.05rem; font-weight: 800; font-family: 'JetBrains Mono', monospace; margin-top: 4px; }}
+            .c-green {{ color: var(--accent-green); }}
+            .c-red {{ color: var(--accent-red); }}
+            .c-cyan {{ color: var(--accent-cyan); }}
+
+            /* Filter Controls */
+            .filter-scroller {{ display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 12px; scrollbar-width: none; }}
+            .filter-scroller::-webkit-scrollbar {{ display: none; }}
+            .filter-chip {{ background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); font-size: 0.78rem; font-weight: 700; padding: 7px 14px; border-radius: 20px; white-space: nowrap; cursor: pointer; }}
+            .filter-chip.active {{ background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }}
+
+            .search-bar {{ width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text-main); padding: 12px 14px; border-radius: 14px; font-size: 0.9rem; margin-bottom: 16px; outline: none; }}
+            .search-bar:focus {{ border-color: var(--accent-cyan); }}
+
+            /* Navigation Tabs */
+            .nav-tabs {{ display: flex; gap: 6px; margin-bottom: 16px; overflow-x: auto; scrollbar-width: none; }}
+            .tab-btn {{ background: transparent; border: 1px solid transparent; color: var(--text-muted); padding: 8px 14px; border-radius: 10px; font-size: 0.82rem; font-weight: 700; cursor: pointer; white-space: nowrap; }}
+            .tab-btn.active {{ background: var(--surface); border-color: var(--border); color: var(--text-main); }}
+
+            /* Tournament Banner */
+            .tourney-group {{ margin-bottom: 24px; }}
+            .tourney-head {{ display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: rgba(35, 38, 52, 0.4); border-radius: 10px; border-left: 3px solid var(--accent-cyan); margin-bottom: 10px; }}
+            .tourney-title {{ font-size: 0.88rem; font-weight: 800; color: #fff; }}
+            .tourney-meta {{ font-size: 0.7rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }}
+
+            /* Match Prediction Card */
+            .match-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 14px; margin-bottom: 12px; }}
+            .card-top {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
+            .tour-pill {{ background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); font-size: 0.65rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; }}
+            
+            /* Probability Split Bar */
+            .prob-split {{ display: flex; justify-content: space-between; font-size: 0.82rem; font-weight: 700; margin-bottom: 6px; }}
+            .prob-bar {{ display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #232634; margin-bottom: 12px; }}
+            .prob-fill-a {{ background: var(--accent-cyan); transition: width 0.3s; }}
+            .prob-fill-b {{ background: #475569; transition: width 0.3s; }}
+
+            /* Stat Grid */
+            .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; }}
+            .stat-cell {{ background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; text-align: center; }}
+            .stat-lbl {{ font-size: 0.62rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
+            .stat-val {{ font-size: 0.85rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; margin-top: 2px; }}
+
+            /* Quant Vectors Dropdown */
+            .vector-toggle {{ font-size: 0.72rem; color: var(--text-muted); font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-top: 1px dashed var(--border); margin-top: 8px; }}
+            .vector-details {{ display: none; padding-top: 8px; font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; }}
+            .vector-row {{ display: flex; justify-content: space-between; padding: 3px 0; color: var(--text-muted); }}
+
+            /* Betting Action Button */
+            .btn-bet {{ width: 100%; background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid var(--border); color: #fff; padding: 10px; border-radius: 10px; font-size: 0.82rem; font-weight: 700; cursor: pointer; margin-top: 8px; display: flex; justify-content: center; align-items: center; gap: 6px; }}
+            .btn-bet:active {{ transform: scale(0.98); }}
+
+            /* Generic Card Row */
+            .card-row {{ display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem; }}
+            .card-row:last-child {{ border-bottom: none; }}
+            .badge-hit {{ background: rgba(16, 185, 129, 0.2); color: var(--accent-green); padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 800; }}
+            .badge-miss {{ background: rgba(239, 68, 68, 0.2); color: var(--accent-red); padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 800; }}
         </style>
         <script>
             function setTab(name) {{
@@ -195,19 +294,30 @@ def dashboard():
                 document.getElementById('btn-' + name).classList.add('active');
                 document.getElementById('pane-' + name).style.display = 'block';
             }}
-            function filterAll() {{
-                const q = document.getElementById('search-input').value.toLowerCase();
+            function filterTour(tour, el) {{
+                document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+                el.classList.add('active');
+                document.querySelectorAll('.tourney-group').forEach(tg => {{
+                    tg.style.display = (tour === 'ALL' || tg.getAttribute('data-tour') === tour) ? 'block' : 'none';
+                }});
+            }}
+            function searchCards() {{
+                const q = document.getElementById('search-box').value.toLowerCase();
                 document.querySelectorAll('.match-card').forEach(c => {{
                     c.style.display = c.getAttribute('data-search').toLowerCase().includes(q) ? 'block' : 'none';
                 }});
             }}
-            async function logWager(matchId, tour, sel, odds) {{
-                const units = prompt(`Log Wager on ${{sel}} (${{odds > 0 ? '+' : ''}}${{odds}}):`, "1.0");
-                if (!units || isNaN(units)) return;
+            function toggleVectors(id) {{
+                const el = document.getElementById('vec-' + id);
+                el.style.display = el.style.display === 'block' ? 'none' : 'block';
+            }}
+            async function logKellyBet(matchId, tour, sel, odds, units) {{
+                const u = prompt(`Place model recommendation on ${{sel}} (${{odds}})?\\nRecommended Units (Quarter Kelly):`, units > 0 ? units : "1.0");
+                if (!u || isNaN(u)) return;
                 await fetch('/api/bet/log', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ match_id: matchId, tour: tour, selection: sel, wager_type: 'Moneyline', odds: odds, units: parseFloat(units) }})
+                    body: JSON.stringify({{ match_id: matchId, tour: tour, selection: sel, wager_type: 'Moneyline', odds: parseInt(odds), units: parseFloat(u) }})
                 }});
                 window.location.reload();
             }}
@@ -220,115 +330,186 @@ def dashboard():
         </script>
     </head>
     <body>
-        <h1>tennis_lg Operations Hub</h1>
-        <div class="sub-status"><span class="dot"></span> Live Tournament Calendar Online</div>
-
-        <div class="metrics-grid">
-            <div class="metric-pill"><div class="metric-title">Accuracy</div><div class="metric-val green">{accuracy_rate}%</div></div>
-            <div class="metric-pill"><div class="metric-title">Audits</div><div class="metric-val">{audit_total}</div></div>
-            <div class="metric-pill"><div class="metric-title">Mean Brier</div><div class="metric-val">{mean_brier}</div></div>
-            <div class="metric-pill"><div class="metric-title">Net Units</div><div class="metric-val {'green' if net_units >= 0 else 'red'}">{net_units:+.2f}u</div></div>
+        <div class="header">
+            <div>
+                <div class="brand-title">tennis_lg // Quant Engine</div>
+                <div class="brand-sub">
+                    <span class="status-dot"></span>
+                    <span>Empirical Markov Monte Carlo Pipeline</span>
+                </div>
+            </div>
+            <div style="text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-muted);">
+                {len(forecasts)} Fixtures Active
+            </div>
         </div>
 
-        <div class="tabs">
+        <div class="metrics-strip">
+            <div class="metric-box">
+                <div class="metric-label">Model Acc</div>
+                <div class="metric-value c-green">{accuracy_rate}%</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">Mean Brier</div>
+                <div class="metric-value c-cyan">{mean_brier}</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">Audited</div>
+                <div class="metric-value">{audit_total}</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-label">Net Units</div>
+                <div class="metric-value {'c-green' if net_units >= 0 else 'c-red'}">{net_units:+.2f}u</div>
+            </div>
+        </div>
+
+        <div class="nav-tabs">
             <button id="btn-slate" class="tab-btn active" onclick="setTab('slate')">Predictions Slate ({len(forecasts)})</button>
             <button id="btn-tourneys" class="tab-btn" onclick="setTab('tourneys')">Active Tournaments ({len(active_tourneys)})</button>
-            <button id="btn-learning" class="tab-btn" onclick="setTab('learning')">Learning Ledger ({len(learning_events)})</button>
             <button id="btn-audits" class="tab-btn" onclick="setTab('audits')">Factual Audits ({audit_total})</button>
-            <button id="btn-bets" class="tab-btn" onclick="setTab('bets')">Betting Log ({len(bets)})</button>
+            <button id="btn-learning" class="tab-btn" onclick="setTab('learning')">Learning Ledger ({len(learning_events)})</button>
+            <button id="btn-bets" class="tab-btn" onclick="setTab('bets')">Wagers ({len(bets)})</button>
         </div>
 
-        <!-- TAB 1: PREDICTIONS GROUPED BY TOURNAMENT -->
+        <!-- TAB 1: PREDICTIONS SLATE -->
         <div id="pane-slate" class="tab-pane">
-            <input type="text" id="search-input" class="search-box" placeholder="🔍 Search tournament, player, or tour level..." onkeyup="filterAll()">
-    """
-    if not grouped_matches:
-        html += "<div class='card'><div class='lbl'>Scanning official scoreboards for active tournament fixtures...</div></div>"
-
-    for (t_name, t_tour, t_surface), matches in grouped_matches.items():
-        html += f"""
-        <div class="tourney-banner">
-            <div>
-                <span class="tourney-title">{t_name}</span>
-                <span class="surface-tag">• {t_surface} Court</span>
+            <div class="filter-scroller">
+                <button class="filter-chip active" onclick="filterTour('ALL', this)">All Circuits</button>
+                <button class="filter-chip" onclick="filterTour('ATP', this)">ATP Tour</button>
+                <button class="filter-chip" onclick="filterTour('WTA', this)">WTA Tour</button>
+                <button class="filter-chip" onclick="filterTour('CHALLENGER', this)">Challengers</button>
+                <button class="filter-chip" onclick="filterTour('ITF', this)">ITF Qualifiers</button>
+                <button class="filter-chip" onclick="filterTour('DAVIS_CUP', this)">Davis Cup</button>
             </div>
-            <span class="tourney-badge">{t_tour}</span>
-        </div>
+
+            <input type="text" id="search-box" class="search-bar" placeholder="🔍 Search player, tournament, or tour level..." onkeyup="searchCards()">
+    """
+
+    if not grouped_matches:
+        html += "<div class='match-card' style='text-align: center; color: var(--text-muted);'>Ingesting official board fixtures...</div>"
+
+    for idx, ((t_name, t_tour, t_surface), matches) in enumerate(grouped_matches.items()):
+        html += f"""
+        <div class="tourney-group" data-tour="{t_tour}">
+            <div class="tourney-head">
+                <span class="tourney-title">{t_name}</span>
+                <span class="tourney-meta">{t_surface} • {t_tour}</span>
+            </div>
         """
-        for f in matches:
-            fav = f['player_a'] if f['prob_a_win'] >= 0.5 else f['player_b']
-            fav_prob = max(f['prob_a_win'], f['prob_b_win']) * 100
-            fav_ml = f['american_ml_a'] if fav == f['player_a'] else f['american_ml_b']
-            fav_ml_str = f"+{fav_ml}" if fav_ml > 0 else str(fav_ml)
+        for m_idx, m in enumerate(matches):
+            card_id = f"{idx}_{m_idx}"
             html += f"""
-            <div class="card match-card" data-search="{t_name} {f['tour']} {f['player_a']} {f['player_b']}">
-                <div class="card-header"><span>{f['player_a']} vs {f['player_b']}</span></div>
-                <div class="row"><span class="lbl">Predicted Outright</span> <span class="green">{fav} ({fav_prob:.1f}%)</span></div>
-                <div class="row"><span class="lbl">Fair FanDuel ML</span> <span>{fav_ml_str}</span></div>
-                <div class="row"><span class="lbl">Projected Spread</span> <span>{f['proj_game_spread']:+.1f} Games</span></div>
-                <div class="row"><span class="lbl">Total Games Line</span> <span>{f['proj_total_games']}</span></div>
-                <button class="btn-action" onclick="logWager('{f['match_id']}', '{f['tour']}', '{fav}', {fav_ml})">+ Log {fav} ({fav_ml_str}) Bet</button>
+            <div class="match-card" data-search="{t_name} {m['tour']} {m['player_a']} {m['player_b']}">
+                <div class="card-top">
+                    <span style="font-size: 0.95rem; font-weight: 800;">{m['player_a']} vs {m['player_b']}</span>
+                    <span class="tour-pill">{m['tour']}</span>
+                </div>
+
+                <div class="prob-split">
+                    <span style="color: var(--accent-cyan);">{m['player_a']} ({round(m['prob_a_win']*100, 1)}%)</span>
+                    <span style="color: #94a3b8;">{m['player_b']} ({round(m['prob_b_win']*100, 1)}%)</span>
+                </div>
+                <div class="prob-bar">
+                    <div class="prob-fill-a" style="width: {m['prob_a_win']*100}%;"></div>
+                    <div class="prob-fill-b" style="width: {m['prob_b_win']*100}%;"></div>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-cell">
+                        <div class="stat-lbl">Fair ML</div>
+                        <div class="stat-val">{m['fav_ml_str']}</div>
+                    </div>
+                    <div class="stat-cell">
+                        <div class="stat-lbl">Proj Spread</div>
+                        <div class="stat-val">{m['proj_game_spread']:+.1f}g</div>
+                    </div>
+                    <div class="stat-cell">
+                        <div class="stat-lbl">Total Games</div>
+                        <div class="stat-val">{m['proj_total_games']}</div>
+                    </div>
+                </div>
+
+                <div class="vector-toggle" onclick="toggleVectors('{card_id}')">
+                    <span>⚡ Geter Principle Vectors</span>
+                    <span>▼</span>
+                </div>
+                <div id="vec-{card_id}" class="vector-details">
+                    <div class="vector-row"><span>v_physics (Kinematics/CPI):</span> <span>{m['v_physics']:+.3f}</span></div>
+                    <div class="vector-row"><span>v_thermo (Air Drag/Temp):</span> <span>{m['v_thermo']:+.3f}</span></div>
+                    <div class="vector-row"><span>v_bio (Fatigue Load):</span> <span>{m['v_bio']:+.3f}</span></div>
+                    <div class="vector-row"><span>v_variance (Bayesian):</span> <span>{m['v_variance']:+.3f}</span></div>
+                    <div class="vector-row" style="color: var(--accent-cyan); font-weight: 700;"><span>Net Mathematical Edge:</span> <span>{m['net_edge']:+.3f}</span></div>
+                </div>
+
+                <button class="btn-bet" onclick="logKellyBet('{m['match_id']}', '{m['tour']}', '{m['fav']}', '{m['fav_ml_str']}', {m['kelly_units']})">
+                    <span>🎯 Log {m['fav']} ({m['fav_ml_str']})</span>
+                    <span style="font-size: 0.72rem; color: var(--accent-green); font-family: 'JetBrains Mono', monospace;">[{m['kelly_units']}u Kelly]</span>
+                </button>
             </div>
             """
+        html += "</div>"
 
     html += f"""
         </div>
 
-        <!-- TAB 2: ACTIVE TOURNAMENTS HUB -->
+        <!-- TAB 2: ACTIVE TOURNAMENTS -->
         <div id="pane-tourneys" class="tab-pane" style="display: none;">
     """
-    if not active_tourneys:
-        html += "<div class='card'><div class='lbl'>No active tournaments currently populated.</div></div>"
     for at in active_tourneys:
         html += f"""
-        <div class="card">
-            <div class="card-header">
-                <span>{at['name']}</span>
-                <span class="tourney-badge">{at['tour']}</span>
+        <div class="match-card">
+            <div class="card-top">
+                <span style="font-size: 0.95rem; font-weight: 800;">{at['name']}</span>
+                <span class="tour-pill">{at['tour']}</span>
             </div>
-            <div class="row"><span class="lbl">Court Surface</span> <span>{at['surface']}</span></div>
-            <div class="row"><span class="lbl">Active Scheduled Matches</span> <span class="green">{at['match_count']} Fixtures</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Surface Specification</span> <span>{at['surface']} Court</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Queued Match Fixtures</span> <span class="c-green" style="font-weight: 700;">{at['match_count']} Active Matches</span></div>
         </div>
         """
 
     html += f"""
         </div>
 
-        <!-- TAB 3: LEARNING LEDGER -->
-        <div id="pane-learning" class="tab-pane" style="display: none;">
-            <div class="card">
-                <div class="card-header"><span>Learned Correlation Weights (β)</span></div>
-                <div class="row"><span class="lbl">Physics Vector</span> <span style="font-family: monospace;">{betas.get('v_physics', 1.085):.4f}</span></div>
-                <div class="row"><span class="lbl">Thermo Vector</span> <span style="font-family: monospace;">{betas.get('v_thermo', 0.995):.4f}</span></div>
-                <div class="row"><span class="lbl">Fatigue Vector</span> <span style="font-family: monospace;">{betas.get('v_bio', 1.015):.4f}</span></div>
-                <div class="row"><span class="lbl">Variance Vector</span> <span style="font-family: monospace;">{betas.get('v_variance', 0.965):.4f}</span></div>
-            </div>
-    """
-    for e in learning_events:
-        delta_cls = "green" if e['delta'] >= 0 else "red"
-        html += f"""
-        <div class="card">
-            <div class="card-header"><span>{e['parameter']}</span><span class="{delta_cls}">{e['delta']:+.4f}</span></div>
-            <div class="row"><span class="lbl">Shift</span> <span>{e['old_val']:.4f} → {e['new_val']:.4f}</span></div>
-            <div class="row"><span class="lbl">Context</span> <span style="font-size: 0.8rem;">{e['reason']}</span></div>
-        </div>
-        """
-
-    html += f"""
-        </div>
-
-        <!-- TAB 4: FACTUAL AUDITS -->
+        <!-- TAB 3: FACTUAL AUDITS -->
         <div id="pane-audits" class="tab-pane" style="display: none;">
     """
     for a in audits:
-        verdict = "<span style='color: var(--green); font-weight: 800;'>HIT ✅</span>" if a['hit'] else "<span style='color: var(--red); font-weight: 800;'>MISS ❌</span>"
+        badge = "<span class='badge-hit'>HIT ✅</span>" if a['hit'] else "<span class='badge-miss'>MISS ❌</span>"
         html += f"""
-        <div class="card">
-            <div class="card-header"><span>{a['player_a']} vs {a['player_b']}</span>{verdict}</div>
-            <div class="row"><span class="lbl">Model Pick</span> <span>{a['predicted_winner']} ({(max(a['prob_a_win'], a['prob_b_win'])*100):.1f}%)</span></div>
-            <div class="row"><span class="lbl">Official Winner</span> <span class="green">{a['actual_winner']}</span></div>
-            <div class="row"><span class="lbl">Actual Games / Spread</span> <span>{a['actual_total_games']} ({a['actual_game_spread']:+d})</span></div>
-            <div class="row"><span class="lbl">Brier Score</span> <span>{a['brier_score']:.4f}</span></div>
+        <div class="match-card">
+            <div class="card-top">
+                <span style="font-weight: 700;">{a['player_a']} vs {a['player_b']}</span>
+                {badge}
+            </div>
+            <div class="card-row"><span style="color: var(--text-muted);">Model Selection</span> <span>{a['predicted_winner']} ({(max(a['prob_a_win'], a['prob_b_win'])*100):.1f}%)</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Official Outcome</span> <span class="c-green" style="font-weight: 700;">{a['actual_winner']}</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Total Games / Spread</span> <span>{a['actual_total_games']} games ({a['actual_game_spread']:+d})</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Empirical Brier Score</span> <span style="font-family: 'JetBrains Mono', monospace;">{a['brier_score']:.4f}</span></div>
+        </div>
+        """
+
+    html += f"""
+        </div>
+
+        <!-- TAB 4: LEARNING LEDGER -->
+        <div id="pane-learning" class="tab-pane" style="display: none;">
+            <div class="match-card">
+                <div class="card-top"><span style="font-weight: 800;">Calibrated Correlation Weights (β)</span></div>
+                <div class="card-row"><span style="color: var(--text-muted);">v_physics Weight:</span> <span style="font-family: 'JetBrains Mono', monospace;">{betas.get('v_physics', 1.085):.4f}</span></div>
+                <div class="card-row"><span style="color: var(--text-muted);">v_thermo Weight:</span> <span style="font-family: 'JetBrains Mono', monospace;">{betas.get('v_thermo', 0.995):.4f}</span></div>
+                <div class="card-row"><span style="color: var(--text-muted);">v_bio Weight:</span> <span style="font-family: 'JetBrains Mono', monospace;">{betas.get('v_bio', 1.015):.4f}</span></div>
+                <div class="card-row"><span style="color: var(--text-muted);">v_variance Weight:</span> <span style="font-family: 'JetBrains Mono', monospace;">{betas.get('v_variance', 0.965):.4f}</span></div>
+            </div>
+    """
+    for e in learning_events:
+        delta_cls = "c-green" if e['delta'] >= 0 else "c-red"
+        html += f"""
+        <div class="match-card">
+            <div class="card-top">
+                <span style="font-weight: 700;">{e['parameter']}</span>
+                <span class="{delta_cls}" style="font-family: 'JetBrains Mono', monospace; font-weight: 800;">{e['delta']:+.4f}</span>
+            </div>
+            <div class="card-row"><span style="color: var(--text-muted);">Shift</span> <span>{e['old_val']:.4f} → {e['new_val']:.4f}</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Gradient Reason</span> <span style="font-size: 0.78rem;">{e['reason']}</span></div>
         </div>
         """
 
@@ -337,20 +518,26 @@ def dashboard():
 
         <!-- TAB 5: BETTING LOGS -->
         <div id="pane-bets" class="tab-pane" style="display: none;">
-            <div class="card">
-                <div class="card-header"><span>Performance</span> <span class="green">{win_rate}% Win Rate</span></div>
-                <div class="row"><span class="lbl">Settled</span> <span>{resolved}</span></div>
-                <div class="row"><span class="lbl">Net Return</span> <span class="{'green' if net_units >= 0 else 'red'}">{net_units:+.2f}u</span></div>
+            <div class="match-card">
+                <div class="card-top">
+                    <span style="font-weight: 800;">Bankroll Performance</span>
+                    <span class="c-green" style="font-weight: 800;">{win_rate}% Win Rate</span>
+                </div>
+                <div class="card-row"><span style="color: var(--text-muted);">Total Wagers Settled</span> <span>{resolved}</span></div>
+                <div class="card-row"><span style="color: var(--text-muted);">Cumulative Return</span> <span class="{'c-green' if net_units >= 0 else 'c-red'}" style="font-weight: 800;">{net_units:+.2f}u</span></div>
             </div>
     """
     for b in bets:
-        payout = f"{b['payout_units']:+.2f}u" if b['status'] in ('WON', 'LOST') else "Pending"
+        payout = f"{b['payout_units']:+.2f}u" if b['status'] in ('WON', 'LOST') else "In Play"
         html += f"""
-        <div class="card">
-            <div class="card-header"><span>{b['selection']} ({'+' if b['odds'] > 0 else ''}{b['odds']})</span><span>{b['status']}</span></div>
-            <div class="row"><span class="lbl">Tour / Type</span> <span>{b['tour']} • {b['wager_type']}</span></div>
-            <div class="row"><span class="lbl">Stake</span> <span>{b['units']} units</span></div>
-            <div class="row"><span class="lbl">Result</span> <span>{payout}</span></div>
+        <div class="match-card">
+            <div class="card-top">
+                <span style="font-weight: 700;">{b['selection']} ({'+' if b['odds'] > 0 else ''}{b['odds']})</span>
+                <span class="tour-pill">{b['status']}</span>
+            </div>
+            <div class="card-row"><span style="color: var(--text-muted);">Tour / Wager Type</span> <span>{b['tour']} • {b['wager_type']}</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Stake Risked</span> <span>{b['units']} units</span></div>
+            <div class="card-row"><span style="color: var(--text-muted);">Net Payout</span> <span>{payout}</span></div>
         </div>
         """
 
