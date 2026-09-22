@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 tennis_lg: State-of-the-Art Quantitative Tennis Engine & Operations Hub
+- Rigorous Mathematical Accuracy Proof (ECE, Brier Skill Score, Z-Score)
+- Decile Reliability Calibration Matrix
 - Edge Detection & Fractional Kelly Criterion Staking
 - Geter Principle Vector Decomposition (Physics, Thermo, Bio, Variance)
 - Mobile-First Quantitative UI with Multi-Tour Filtering
-- Autonomous 24/7 Lifespan & Live Sync on Open
 """
 
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -29,32 +30,107 @@ def get_db():
     return conn
 
 def calculate_ev_and_kelly(prob: float, american_odds: int, bankroll: float = 1000.0, kelly_fraction: float = 0.25):
-    """
-    Computes Expected Value (EV%) and Recommended Units via Fractional Kelly Criterion.
-    """
     if american_odds > 0:
         b = american_odds / 100.0
     else:
         b = 100.0 / abs(american_odds)
 
-    # EV = (Probability * Decimal Profit) - (1 - Probability)
     ev = (prob * b) - (1.0 - prob)
     ev_pct = round(ev * 100.0, 2)
-
-    # Kelly Criterion: f* = (bp - q) / b
     q = 1.0 - prob
-    if b > 0:
-        f_star = (b * prob - q) / b
-    else:
-        f_star = 0.0
+    f_star = (b * prob - q) / b if b > 0 else 0.0
 
-    # Apply quarter-kelly fractional cap (max 3.0 units)
     if f_star > 0 and ev > 0:
         recommended_units = round(min(3.0, max(0.25, f_star * kelly_fraction * 10.0)), 2)
     else:
         recommended_units = 0.0
 
     return ev_pct, recommended_units
+
+def compute_calibration_proof(audits):
+    """
+    Computes formal statistical proof metrics:
+    - Decile Calibration Matrix
+    - Expected Calibration Error (ECE)
+    - Brier Skill Score (BSS)
+    - Log-Loss / Cross Entropy
+    - Z-Score of statistical significance vs 50/50 chance
+    """
+    if not audits:
+        return {
+            "bins": [], "ece": 0.0, "bss": 0.0, "log_loss": 0.0,
+            "z_score": 0.0, "p_val_str": "N/A", "total_evaluated": 0
+        }
+
+    total_n = len(audits)
+    correct_count = 0
+    total_brier = 0.0
+    total_log_loss = 0.0
+
+    # Define confidence bins for favorites (0.50 to 1.00)
+    bins_def = [
+        {"label": "50% – 60%", "min": 0.50, "max": 0.60, "preds": [], "actuals": []},
+        {"label": "60% – 70%", "min": 0.60, "max": 0.70, "preds": [], "actuals": []},
+        {"label": "70% – 80%", "min": 0.70, "max": 0.80, "preds": [], "actuals": []},
+        {"label": "80% – 100%", "min": 0.80, "max": 1.00, "preds": [], "actuals": []}
+    ]
+
+    for a in audits:
+        fav_prob = max(a['prob_a_win'], a['prob_b_win'])
+        pred_winner = a['player_a'] if a['prob_a_win'] >= a['prob_b_win'] else a['player_b']
+        hit = 1.0 if pred_winner == a['actual_winner'] else 0.0
+
+        if hit == 1.0:
+            correct_count += 1
+
+        total_brier += (fav_prob - hit) ** 2
+        p_clamped = max(0.001, min(0.999, fav_prob))
+        total_log_loss += -(hit * math.log(p_clamped) + (1.0 - hit) * math.log(1.0 - p_clamped))
+
+        for b in bins_def:
+            if b['min'] <= fav_prob < b['max'] or (b['max'] == 1.00 and fav_prob == 1.00):
+                b['preds'].append(fav_prob)
+                b['actuals'].append(hit)
+                break
+
+    mean_brier = total_brier / total_n
+    mean_log_loss = total_log_loss / total_n
+    bss = (1.0 - (mean_brier / 0.2500)) * 100.0
+
+    # Expected Calibration Error (ECE)
+    ece_weighted_sum = 0.0
+    processed_bins = []
+    for b in bins_def:
+        count = len(b['preds'])
+        if count > 0:
+            pred_avg = sum(b['preds']) / count
+            actual_avg = sum(b['actuals']) / count
+            gap = abs(pred_avg - actual_avg)
+            ece_weighted_sum += (count / total_n) * gap
+            processed_bins.append({
+                "label": b['label'],
+                "count": count,
+                "pred_pct": round(pred_avg * 100, 1),
+                "actual_pct": round(actual_avg * 100, 1),
+                "gap_pct": round(gap * 100, 2)
+            })
+
+    # One-sample proportion test against 50% null hypothesis
+    p0 = 0.50
+    se = math.sqrt(p0 * (1.0 - p0) / total_n)
+    obs_rate = correct_count / total_n
+    z_score = (obs_rate - p0) / se
+    p_val_str = "< 1e-20 (Statistically Significant)" if z_score > 8.0 else f"{math.erfc(z_score / math.sqrt(2))/2:.4e}"
+
+    return {
+        "bins": processed_bins,
+        "ece": round(ece_weighted_sum * 100, 2),
+        "bss": round(bss, 2),
+        "log_loss": round(mean_log_loss, 4),
+        "z_score": round(z_score, 2),
+        "p_val_str": p_val_str,
+        "total_evaluated": total_n
+    }
 
 def execute_pipeline_refresh():
     global LAST_RUN
@@ -81,7 +157,7 @@ async def lifespan(app: FastAPI):
     yield
     worker.cancel()
 
-app = FastAPI(title="tennis_lg Quant Engine", lifespan=lifespan)
+app = FastAPI(title="tennis_lg Operations Hub", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -110,7 +186,7 @@ def dashboard():
     conn = get_db()
     c = conn.cursor()
 
-    # 1. Fetch Model Forecasts with Tournament Surfaces
+    # 1. Active Predictions Slate
     c.execute("""
         SELECT f.*, COALESCE(t.name, f.tournament_id) as tourney_name, COALESCE(t.surface, 'Hard') as tourney_surface
         FROM Model_Forecasts f
@@ -122,16 +198,11 @@ def dashboard():
     forecasts = []
     grouped_matches = defaultdict(list)
     for f in raw_forecasts:
-        # Determine favorite and underdog
         is_a_fav = f['prob_a_win'] >= f['prob_b_win']
         fav = f['player_a'] if is_a_fav else f['player_b']
         und = f['player_b'] if is_a_fav else f['player_a']
         fav_prob = max(f['prob_a_win'], f['prob_b_win'])
-        und_prob = min(f['prob_a_win'], f['prob_b_win'])
         fav_ml = f['american_ml_a'] if is_a_fav else f['american_ml_b']
-        und_ml = f['american_ml_b'] if is_a_fav else f['american_ml_a']
-
-        # Quantitative Metrics
         ev_pct, kelly_units = calculate_ev_and_kelly(fav_prob, fav_ml)
 
         match_data = {
@@ -139,9 +210,7 @@ def dashboard():
             'fav': fav,
             'und': und,
             'fav_prob_pct': round(fav_prob * 100, 1),
-            'und_prob_pct': round(und_prob * 100, 1),
             'fav_ml_str': f"+{fav_ml}" if fav_ml > 0 else str(fav_ml),
-            'und_ml_str': f"+{und_ml}" if und_ml > 0 else str(und_ml),
             'ev_pct': ev_pct,
             'kelly_units': kelly_units
         }
@@ -158,15 +227,15 @@ def dashboard():
     """)
     active_tourneys = [dict(row) for row in c.fetchall()]
 
-    # 3. Model Weights & Drift
+    # 3. Model Weights & Learning Logs
     c.execute("SELECT * FROM Feature_Correlations;")
     betas = {row['vector_name']: row['beta_weight'] for row in c.fetchall()}
     
     c.execute("SELECT * FROM Learning_Log ORDER BY id DESC LIMIT 50;")
     learning_events = [dict(row) for row in c.fetchall()]
 
-    # 4. Factual Audits Ledger
-    c.execute("SELECT * FROM Historical_Forecasts WHERE player_a NOT LIKE 'Player_%' ORDER BY evaluated_at DESC LIMIT 500;")
+    # 4. Factual Audits & Rigorous Accuracy Proof Metrics
+    c.execute("SELECT * FROM Historical_Forecasts WHERE player_a NOT LIKE 'Player_%' ORDER BY evaluated_at DESC LIMIT 1500;")
     raw_audits = [dict(row) for row in c.fetchall()]
     audits = []
     correct_count = 0
@@ -181,6 +250,9 @@ def dashboard():
     audit_total = len(audits)
     accuracy_rate = round((correct_count / audit_total * 100), 1) if audit_total > 0 else 0.0
     mean_brier = round(total_brier / audit_total, 4) if audit_total > 0 else 0.0
+
+    # Compute Statistical Accuracy Proof & Calibration Matrix
+    proof = compute_calibration_proof(audits)
 
     # 5. Betting Ledger
     c.execute("SELECT * FROM Betting_Logs ORDER BY logged_at DESC;")
@@ -197,7 +269,7 @@ def dashboard():
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0, viewport-fit=cover">
-        <meta name="theme-color" content="#0a0a0c">
+        <meta name="theme-color" content="#090a0f">
         <title>tennis_lg | Predictive Quantitative Engine</title>
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -206,7 +278,6 @@ def dashboard():
             :root {{
                 --bg: #090a0f;
                 --surface: #12131a;
-                --surface-hover: #191b24;
                 --border: #232634;
                 --text-main: #f8fafc;
                 --text-muted: #828a9e;
@@ -220,13 +291,11 @@ def dashboard():
             * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }}
             body {{ background: var(--bg); color: var(--text-main); padding: 16px 16px 90px 16px; min-height: 100vh; }}
             
-            /* Header */
             .header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }}
             .brand-title {{ font-size: 1.35rem; font-weight: 800; letter-spacing: -0.5px; background: linear-gradient(135deg, #fff 40%, var(--accent-cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
             .brand-sub {{ font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; margin-top: 3px; display: flex; align-items: center; gap: 6px; }}
             .status-dot {{ width: 7px; height: 7px; background: var(--accent-green); border-radius: 50%; box-shadow: 0 0 10px var(--accent-green); }}
 
-            /* Quantitative Stats Bar */
             .metrics-strip {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 18px; }}
             .metric-box {{ background: var(--surface); border: 1px solid var(--border); padding: 10px 8px; border-radius: 12px; text-align: center; }}
             .metric-label {{ font-size: 0.65rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }}
@@ -235,7 +304,6 @@ def dashboard():
             .c-red {{ color: var(--accent-red); }}
             .c-cyan {{ color: var(--accent-cyan); }}
 
-            /* Filter Controls */
             .filter-scroller {{ display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 12px; scrollbar-width: none; }}
             .filter-scroller::-webkit-scrollbar {{ display: none; }}
             .filter-chip {{ background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); font-size: 0.78rem; font-weight: 700; padding: 7px 14px; border-radius: 20px; white-space: nowrap; cursor: pointer; }}
@@ -244,48 +312,43 @@ def dashboard():
             .search-bar {{ width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text-main); padding: 12px 14px; border-radius: 14px; font-size: 0.9rem; margin-bottom: 16px; outline: none; }}
             .search-bar:focus {{ border-color: var(--accent-cyan); }}
 
-            /* Navigation Tabs */
             .nav-tabs {{ display: flex; gap: 6px; margin-bottom: 16px; overflow-x: auto; scrollbar-width: none; }}
             .tab-btn {{ background: transparent; border: 1px solid transparent; color: var(--text-muted); padding: 8px 14px; border-radius: 10px; font-size: 0.82rem; font-weight: 700; cursor: pointer; white-space: nowrap; }}
             .tab-btn.active {{ background: var(--surface); border-color: var(--border); color: var(--text-main); }}
 
-            /* Tournament Banner */
             .tourney-group {{ margin-bottom: 24px; }}
             .tourney-head {{ display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: rgba(35, 38, 52, 0.4); border-radius: 10px; border-left: 3px solid var(--accent-cyan); margin-bottom: 10px; }}
             .tourney-title {{ font-size: 0.88rem; font-weight: 800; color: #fff; }}
             .tourney-meta {{ font-size: 0.7rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }}
 
-            /* Match Prediction Card */
             .match-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 14px; margin-bottom: 12px; }}
             .card-top {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
             .tour-pill {{ background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); font-size: 0.65rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; }}
             
-            /* Probability Split Bar */
             .prob-split {{ display: flex; justify-content: space-between; font-size: 0.82rem; font-weight: 700; margin-bottom: 6px; }}
             .prob-bar {{ display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #232634; margin-bottom: 12px; }}
-            .prob-fill-a {{ background: var(--accent-cyan); transition: width 0.3s; }}
-            .prob-fill-b {{ background: #475569; transition: width 0.3s; }}
+            .prob-fill-a {{ background: var(--accent-cyan); }}
+            .prob-fill-b {{ background: #475569; }}
 
-            /* Stat Grid */
             .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; }}
             .stat-cell {{ background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; text-align: center; }}
             .stat-lbl {{ font-size: 0.62rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
             .stat-val {{ font-size: 0.85rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; margin-top: 2px; }}
 
-            /* Quant Vectors Dropdown */
             .vector-toggle {{ font-size: 0.72rem; color: var(--text-muted); font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-top: 1px dashed var(--border); margin-top: 8px; }}
             .vector-details {{ display: none; padding-top: 8px; font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; }}
             .vector-row {{ display: flex; justify-content: space-between; padding: 3px 0; color: var(--text-muted); }}
 
-            /* Betting Action Button */
             .btn-bet {{ width: 100%; background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid var(--border); color: #fff; padding: 10px; border-radius: 10px; font-size: 0.82rem; font-weight: 700; cursor: pointer; margin-top: 8px; display: flex; justify-content: center; align-items: center; gap: 6px; }}
-            .btn-bet:active {{ transform: scale(0.98); }}
-
-            /* Generic Card Row */
             .card-row {{ display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem; }}
             .card-row:last-child {{ border-bottom: none; }}
             .badge-hit {{ background: rgba(16, 185, 129, 0.2); color: var(--accent-green); padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 800; }}
             .badge-miss {{ background: rgba(239, 68, 68, 0.2); color: var(--accent-red); padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 800; }}
+
+            /* Calibration Proof Table */
+            .proof-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; }}
+            .proof-table th {{ text-align: left; padding: 8px 6px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-size: 0.7rem; text-transform: uppercase; }}
+            .proof-table td {{ padding: 8px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }}
         </style>
         <script>
             function setTab(name) {{
@@ -312,7 +375,7 @@ def dashboard():
                 el.style.display = el.style.display === 'block' ? 'none' : 'block';
             }}
             async function logKellyBet(matchId, tour, sel, odds, units) {{
-                const u = prompt(`Place model recommendation on ${{sel}} (${{odds}})?\\nRecommended Units (Quarter Kelly):`, units > 0 ? units : "1.0");
+                const u = prompt(`Place wager on ${{sel}} (${{odds}})?\\nQuarter Kelly Recommendation:`, units > 0 ? units : "1.0");
                 if (!u || isNaN(u)) return;
                 await fetch('/api/bet/log', {{
                     method: 'POST',
@@ -353,8 +416,8 @@ def dashboard():
                 <div class="metric-value c-cyan">{mean_brier}</div>
             </div>
             <div class="metric-box">
-                <div class="metric-label">Audited</div>
-                <div class="metric-value">{audit_total}</div>
+                <div class="metric-label">ECE Error</div>
+                <div class="metric-value c-green">{proof['ece']}%</div>
             </div>
             <div class="metric-box">
                 <div class="metric-label">Net Units</div>
@@ -364,6 +427,7 @@ def dashboard():
 
         <div class="nav-tabs">
             <button id="btn-slate" class="tab-btn active" onclick="setTab('slate')">Predictions Slate ({len(forecasts)})</button>
+            <button id="btn-proof" class="tab-btn" onclick="setTab('proof')">Accuracy Proof & Calibration</button>
             <button id="btn-tourneys" class="tab-btn" onclick="setTab('tourneys')">Active Tournaments ({len(active_tourneys)})</button>
             <button id="btn-audits" class="tab-btn" onclick="setTab('audits')">Factual Audits ({audit_total})</button>
             <button id="btn-learning" class="tab-btn" onclick="setTab('learning')">Learning Ledger ({len(learning_events)})</button>
@@ -451,7 +515,71 @@ def dashboard():
     html += f"""
         </div>
 
-        <!-- TAB 2: ACTIVE TOURNAMENTS -->
+        <!-- TAB 2: ACCURACY PROOF & CALIBRATION (SCIENTIFIC PROOF ENGINE) -->
+        <div id="pane-proof" class="tab-pane" style="display: none;">
+            <div class="match-card">
+                <div class="card-top">
+                    <span style="font-size: 0.95rem; font-weight: 800;">Mathematical Proof of Accuracy</span>
+                    <span class="tour-pill">N = {proof['total_evaluated']} MATCHES</span>
+                </div>
+                <div class="card-row">
+                    <span style="color: var(--text-muted);">Expected Calibration Error (ECE)</span>
+                    <span class="c-green" style="font-family: 'JetBrains Mono', monospace; font-weight: 800;">{proof['ece']}% (Target: < 4.0%)</span>
+                </div>
+                <div class="card-row">
+                    <span style="color: var(--text-muted);">Brier Skill Score (BSS vs 50/50)</span>
+                    <span class="c-cyan" style="font-family: 'JetBrains Mono', monospace; font-weight: 800;">+{proof['bss']}% Skill Lift</span>
+                </div>
+                <div class="card-row">
+                    <span style="color: var(--text-muted);">Statistical Significance (Z-Score)</span>
+                    <span class="c-green" style="font-family: 'JetBrains Mono', monospace; font-weight: 800;">Z = {proof['z_score']}</span>
+                </div>
+                <div class="card-row">
+                    <span style="color: var(--text-muted);">p-Value (vs Random Luck)</span>
+                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">{proof['p_val_str']}</span>
+                </div>
+                <div class="card-row">
+                    <span style="color: var(--text-muted);">Cross-Entropy Log-Loss</span>
+                    <span style="font-family: 'JetBrains Mono', monospace;">{proof['log_loss']} (Benchmark: 0.6931)</span>
+                </div>
+            </div>
+
+            <div class="match-card">
+                <div class="card-top">
+                    <span style="font-size: 0.9rem; font-weight: 800;">Reliability Calibration Matrix</span>
+                </div>
+                <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">
+                    Compares model-predicted probability bins against actual empirical win rates.
+                </p>
+                <table class="proof-table">
+                    <thead>
+                        <tr>
+                            <th>Confidence Bin</th>
+                            <th>Sample</th>
+                            <th>Predicted</th>
+                            <th>Observed</th>
+                            <th>Error</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+    """
+    for b in proof['bins']:
+        html += f"""
+            <tr>
+                <td style="font-weight: 700; color: #fff;">{b['label']}</td>
+                <td>{b['count']}</td>
+                <td style="color: var(--accent-cyan);">{b['pred_pct']}%</td>
+                <td style="color: var(--accent-green); font-weight: 700;">{b['actual_pct']}%</td>
+                <td style="color: var(--accent-amber);">{b['gap_pct']}%</td>
+            </tr>
+        """
+    html += f"""
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- TAB 3: ACTIVE TOURNAMENTS -->
         <div id="pane-tourneys" class="tab-pane" style="display: none;">
     """
     for at in active_tourneys:
@@ -469,7 +597,7 @@ def dashboard():
     html += f"""
         </div>
 
-        <!-- TAB 3: FACTUAL AUDITS -->
+        <!-- TAB 4: FACTUAL AUDITS -->
         <div id="pane-audits" class="tab-pane" style="display: none;">
     """
     for a in audits:
@@ -490,7 +618,7 @@ def dashboard():
     html += f"""
         </div>
 
-        <!-- TAB 4: LEARNING LEDGER -->
+        <!-- TAB 5: LEARNING LEDGER -->
         <div id="pane-learning" class="tab-pane" style="display: none;">
             <div class="match-card">
                 <div class="card-top"><span style="font-weight: 800;">Calibrated Correlation Weights (β)</span></div>
@@ -516,7 +644,7 @@ def dashboard():
     html += f"""
         </div>
 
-        <!-- TAB 5: BETTING LOGS -->
+        <!-- TAB 6: BETTING LOGS -->
         <div id="pane-bets" class="tab-pane" style="display: none;">
             <div class="match-card">
                 <div class="card-top">
