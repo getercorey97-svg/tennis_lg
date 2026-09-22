@@ -1,8 +1,8 @@
 nohup: ignoring input
-INFO:     Started server process [2199]
+INFO:     Started server process [4251]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-[SUCCESS] Discovered 0 tournaments and queued 0 clean matches.
-[PIPELINE] No active fixtures currently scheduled.
-[AUDITOR] No pending unaudited matches in database.
+[SUCCESS] Cataloged 4 tournaments and queued 249 clean singles matches.
+[PIPELINE] Generating predictions for 246 live fixtures...
+[PIPELINE COMPLETE] Fresh slate predictions generated.
