@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-tennis_lg: State-of-the-Art Quantitative Tennis Engine & Operations Hub
-- Rigorous Mathematical Accuracy Proof (ECE, Brier Skill Score, Z-Score)
-- Decile Reliability Calibration Matrix
-- Edge Detection & Fractional Kelly Criterion Staking
-- Geter Principle Vector Decomposition (Physics, Thermo, Bio, Variance)
-- Mobile-First Quantitative UI with Multi-Tour Filtering
+tennis_lg: Autonomous Multi-Tour Operations Hub & Scientific Accuracy Proof
+- Automated Background Loop: post_mortem -> scraper -> run_pipeline
+- Factual Post-Mortem Audit & Gradient Descent Parameter Learning
+- Mathematical Proof of Accuracy: ECE, Brier Skill Score, Z-Score
+- Mobile-First Quantitative UI with Kelly Criterion Staking
 """
 
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -48,14 +47,6 @@ def calculate_ev_and_kelly(prob: float, american_odds: int, bankroll: float = 10
     return ev_pct, recommended_units
 
 def compute_calibration_proof(audits):
-    """
-    Computes formal statistical proof metrics:
-    - Decile Calibration Matrix
-    - Expected Calibration Error (ECE)
-    - Brier Skill Score (BSS)
-    - Log-Loss / Cross Entropy
-    - Z-Score of statistical significance vs 50/50 chance
-    """
     if not audits:
         return {
             "bins": [], "ece": 0.0, "bss": 0.0, "log_loss": 0.0,
@@ -67,7 +58,6 @@ def compute_calibration_proof(audits):
     total_brier = 0.0
     total_log_loss = 0.0
 
-    # Define confidence bins for favorites (0.50 to 1.00)
     bins_def = [
         {"label": "50% – 60%", "min": 0.50, "max": 0.60, "preds": [], "actuals": []},
         {"label": "60% – 70%", "min": 0.60, "max": 0.70, "preds": [], "actuals": []},
@@ -97,7 +87,6 @@ def compute_calibration_proof(audits):
     mean_log_loss = total_log_loss / total_n
     bss = (1.0 - (mean_brier / 0.2500)) * 100.0
 
-    # Expected Calibration Error (ECE)
     ece_weighted_sum = 0.0
     processed_bins = []
     for b in bins_def:
@@ -115,7 +104,6 @@ def compute_calibration_proof(audits):
                 "gap_pct": round(gap * 100, 2)
             })
 
-    # One-sample proportion test against 50% null hypothesis
     p0 = 0.50
     se = math.sqrt(p0 * (1.0 - p0) / total_n)
     obs_rate = correct_count / total_n
@@ -139,9 +127,13 @@ def execute_pipeline_refresh():
         return
     LAST_RUN = now
     try:
-        subprocess.run(["python3", "scraper.py"], check=False)
-        subprocess.run(["python3", "run_pipeline.py"], check=False)
+        # STRICT LIFECYCLE SEQUENCE:
+        # 1. Audit finished matches and learn parameter gradients FIRST
         subprocess.run(["python3", "post_mortem.py"], check=False)
+        # 2. Ingest worldwide active/upcoming matches
+        subprocess.run(["python3", "scraper.py"], check=False)
+        # 3. Project new unforecasted matches and lock them
+        subprocess.run(["python3", "run_pipeline.py"], check=False)
     except Exception as e:
         print(f"[PIPELINE SYNC ERROR] {e}")
 
@@ -149,7 +141,7 @@ async def background_loop():
     await asyncio.sleep(5)
     while True:
         execute_pipeline_refresh()
-        await asyncio.sleep(900)
+        await asyncio.sleep(900)  # Every 15 minutes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -186,7 +178,7 @@ def dashboard():
     conn = get_db()
     c = conn.cursor()
 
-    # 1. Active Predictions Slate
+    # 1. Active Forecasts
     c.execute("""
         SELECT f.*, COALESCE(t.name, f.tournament_id) as tourney_name, COALESCE(t.surface, 'Hard') as tourney_surface
         FROM Model_Forecasts f
@@ -250,8 +242,6 @@ def dashboard():
     audit_total = len(audits)
     accuracy_rate = round((correct_count / audit_total * 100), 1) if audit_total > 0 else 0.0
     mean_brier = round(total_brier / audit_total, 4) if audit_total > 0 else 0.0
-
-    # Compute Statistical Accuracy Proof & Calibration Matrix
     proof = compute_calibration_proof(audits)
 
     # 5. Betting Ledger
@@ -345,7 +335,6 @@ def dashboard():
             .badge-hit {{ background: rgba(16, 185, 129, 0.2); color: var(--accent-green); padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 800; }}
             .badge-miss {{ background: rgba(239, 68, 68, 0.2); color: var(--accent-red); padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 800; }}
 
-            /* Calibration Proof Table */
             .proof-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; }}
             .proof-table th {{ text-align: left; padding: 8px 6px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-size: 0.7rem; text-transform: uppercase; }}
             .proof-table td {{ padding: 8px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }}
@@ -398,11 +387,11 @@ def dashboard():
                 <div class="brand-title">tennis_lg // Quant Engine</div>
                 <div class="brand-sub">
                     <span class="status-dot"></span>
-                    <span>Empirical Markov Monte Carlo Pipeline</span>
+                    <span>Autonomous Self-Learning Execution Loop</span>
                 </div>
             </div>
             <div style="text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-muted);">
-                {len(forecasts)} Fixtures Active
+                {len(forecasts)} Fixtures Queued
             </div>
         </div>
 
@@ -515,7 +504,7 @@ def dashboard():
     html += f"""
         </div>
 
-        <!-- TAB 2: ACCURACY PROOF & CALIBRATION (SCIENTIFIC PROOF ENGINE) -->
+        <!-- TAB 2: ACCURACY PROOF & CALIBRATION -->
         <div id="pane-proof" class="tab-pane" style="display: none;">
             <div class="match-card">
                 <div class="card-top">
@@ -535,7 +524,7 @@ def dashboard():
                     <span class="c-green" style="font-family: 'JetBrains Mono', monospace; font-weight: 800;">Z = {proof['z_score']}</span>
                 </div>
                 <div class="card-row">
-                    <span style="color: var(--text-muted);">p-Value (vs Random Luck)</span>
+                    <span style="color: var(--text-muted);">p-Value (vs Random Chance)</span>
                     <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;">{proof['p_val_str']}</span>
                 </div>
                 <div class="card-row">
@@ -548,9 +537,6 @@ def dashboard():
                 <div class="card-top">
                     <span style="font-size: 0.9rem; font-weight: 800;">Reliability Calibration Matrix</span>
                 </div>
-                <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">
-                    Compares model-predicted probability bins against actual empirical win rates.
-                </p>
                 <table class="proof-table">
                     <thead>
                         <tr>

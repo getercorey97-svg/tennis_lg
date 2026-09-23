@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-tennis_lg: High-Throughput Worldwide Projection Engine
+tennis_lg: Immutable Pre-Match Projection Pipeline
 Calculates analytical Markov chain win probabilities, game totals, spreads,
-fair FanDuel American moneylines, and Geter Principle vectors across hundreds of global matches.
+fair FanDuel moneylines, and Geter Principle vectors.
+Locks predictions without overwriting active forecasts.
 """
 
 import sqlite3
@@ -15,16 +16,12 @@ def calculate_projection(p_a_stats, p_b_stats, best_of=3):
     sp_a, rq_a, pts_a = p_a_stats
     sp_b, rq_b, pts_b = p_b_stats
 
-    # Net dominance difference
     diff = (sp_a + rq_a) - (sp_b + rq_b)
-
-    # Calibrated logistic scale factor (14.2 for best-of-3, 18.5 for best-of-5)
     factor = 14.2 if best_of == 3 else 18.5
     prob_a = 1.0 / (1.0 + math.exp(-factor * diff))
     prob_a = max(0.02, min(0.98, prob_a))
     prob_b = 1.0 - prob_a
 
-    # Fair FanDuel American moneylines
     if prob_a >= 0.5:
         ml_a = int(round(-100.0 * prob_a / (1.0 - prob_a)))
         ml_b = int(round(100.0 * (1.0 - prob_a) / prob_a))
@@ -32,13 +29,11 @@ def calculate_projection(p_a_stats, p_b_stats, best_of=3):
         ml_a = int(round(100.0 * prob_a / (1.0 - prob_a)))
         ml_b = int(round(-100.0 * prob_b / (1.0 - prob_b)))
 
-    # Projected game totals and spreads
     closeness = 1.0 - abs(prob_a - 0.5) * 2.0
     base_games = 21.0 if best_of == 3 else 36.0
     tot_games = round(base_games + closeness * 3.5, 1)
     spread = round((prob_a - 0.5) * 7.5, 1)
 
-    # Geter Principle Vectors
     v_phys = round(diff * 1.085, 3)
     v_therm = round((0.5 - abs(prob_a - 0.5)) * 0.12 * 0.995, 3)
     v_bio = round(0.0, 3)
@@ -65,30 +60,28 @@ def run():
     c = conn.cursor()
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Fetch scheduled cards
+    # Select only new fixtures that have not yet been projected
     c.execute("""
         SELECT d.*, t.best_of
         FROM Daily_Card d
         LEFT JOIN Tournaments t ON d.tournament_id = t.id
-        WHERE d.status = 'SCHEDULED';
+        LEFT JOIN Model_Forecasts f ON d.match_id = f.match_id
+        WHERE d.status = 'SCHEDULED' AND f.match_id IS NULL;
     """)
-    fixtures = [dict(r) for r in c.fetchall()]
+    new_fixtures = [dict(r) for r in c.fetchall()]
 
-    if not fixtures:
-        print("[PIPELINE] No scheduled fixtures found.")
+    if not new_fixtures:
+        print("[PIPELINE] No new unprojected fixtures. Active forecasts preserved.")
         conn.close()
         return
 
-    print(f"[PIPELINE] Generating projections for {len(fixtures)} worldwide fixtures...")
+    print(f"[PIPELINE] Generating predictions for {len(new_fixtures)} new fixtures...")
 
-    # Load player profiles into memory
     c.execute("SELECT id, name, serve_p, return_q, sample_points FROM Players;")
     player_cache = {r['id']: (r['name'], r['serve_p'], r['return_q'], r['sample_points']) for r in c.fetchall()}
 
-    c.execute("DELETE FROM Model_Forecasts;")
     forecast_rows = []
-
-    for f in fixtures:
+    for f in new_fixtures:
         p_a_data = player_cache.get(f['player_a_id'], (f['player_a_id'].replace("PRO_", "").replace("_", " "), 0.640, 0.360, 100))
         p_b_data = player_cache.get(f['player_b_id'], (f['player_b_id'].replace("PRO_", "").replace("_", " "), 0.640, 0.360, 100))
 
@@ -116,7 +109,7 @@ def run():
 
     conn.commit()
     conn.close()
-    print(f"[PIPELINE COMPLETE] {len(forecast_rows)} predictions generated across all global circuits.")
+    print(f"[PIPELINE COMPLETE] {len(forecast_rows)} new predictions locked into database.")
 
 if __name__ == "__main__":
     run()
