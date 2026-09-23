@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Precise Multi-Tour Ingestion Engine
-Strictly validates player profiles against /player/ links.
-Completely isolates tournament headers and filters doubles.
+tennis_lg: Global Ingestion Engine with Tournament Name Sanitization
+Strips website navigation tags (S 1 2 3 4 5, H2H, H A) from event titles.
 """
 
 import sqlite3
 import requests
-from bs4 import BeautifulSoup
-from datetime import datetime, timezone
 import re
+from datetime import datetime, timezone, timedelta
 
 DB_NAME = "tennis_lg.db"
 
@@ -25,32 +23,54 @@ HEADERS = {
 def clean_txt(t):
     if not t:
         return ""
-    return re.sub(r'\s+', ' ', t.replace('\xa0', ' ')).strip()
+    # Strip site navigation tokens: S, D, numbers, H2H, H, A
+    cleaned = re.sub(r'\b(S|D|\d+|H2H|H|A)\b', '', t)
+    return re.sub(r'\s+', ' ', cleaned.replace('\xa0', ' ')).strip()
 
-def sync_active_tournaments():
+def classify_circuit(raw_name):
+    clean = clean_txt(raw_name)
+    nl = clean.lower()
+
+    if any(k in nl for k in ["davis cup", "billie jean", "bjk cup", "hopman", "united cup", "olympic"]):
+        tour = "DAVIS_CUP"
+    elif "utr" in nl:
+        tour = "UTR"
+    elif any(k in nl for k in ["challenger", "ch."]):
+        tour = "CHALLENGER"
+    elif any(k in nl for k in ["wta", "ankara", "porto", "seoul", "sao paulo", "women", "w100", "w75", "w50", "w35", "w15"]):
+        tour = "WTA"
+    elif any(k in nl for k in ["atp", "grand slam", "masters"]):
+        tour = "ATP"
+    elif any(k in nl for k in ["itf", "m25", "m15", "futures"]):
+        tour = "ITF"
+    else:
+        tour = "ITF"
+
+    surface = "Clay" if "clay" in nl else ("Grass" if "grass" in nl else "Hard")
+    cpi = 28.0 if surface == "Clay" else (45.0 if surface == "Grass" else 38.0)
+    return clean, tour, surface, cpi
+
+def sync_worldwide_slate():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc)
+    now_ts = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Clear outdated fixtures and faulty predictions
     c.execute("DELETE FROM Daily_Card WHERE status = 'SCHEDULED';")
-    c.execute("DELETE FROM Model_Forecasts;")
 
     tournaments_discovered = {}
     players_discovered = set()
     matches_queued = 0
 
-    # 1. ESPN API (ATP & WTA Main Draws)
-    for tour, url in ESPN_ENDPOINTS.items():
+    # 1. ESPN Scoreboards
+    for tour_code, url in ESPN_ENDPOINTS.items():
         try:
             res = requests.get(url, headers=HEADERS, timeout=8)
             if res.status_code == 200:
                 for ev in res.json().get("events", []):
-                    t_name = clean_txt(ev.get("name", f"{tour} Championship"))
-                    t_id = f"{tour}_{ev.get('id', 'EV')}"
-                    surface = "Clay" if "clay" in t_name.lower() else ("Grass" if "grass" in t_name.lower() else "Hard")
-                    cpi = 28.0 if surface == "Clay" else 38.0
-                    tournaments_discovered[t_id] = (t_id, t_name, tour, surface, cpi, 0, 15.0, 3)
+                    t_name, tour_type, surface, cpi = classify_circuit(ev.get("name", f"{tour_code} Championship"))
+                    t_id = f"{tour_type}_{ev.get('id', 'EV')}"
+                    tournaments_discovered[t_id] = (t_id, t_name, tour_type, surface, cpi, 0, 15.0, 3)
 
                     for comp in ev.get("competitions", []):
                         comps = comp.get("competitors", [])
@@ -62,92 +82,95 @@ def sync_active_tournaments():
 
                             p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
                             p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
-                            m_id = f"MATCH_{tour}_{comp.get('id')}"
+                            m_id = f"MATCH_{tour_code}_{comp.get('id')}"
 
-                            players_discovered.add((p_a_id, p_a, tour))
-                            players_discovered.add((p_b_id, p_b, tour))
+                            players_discovered.add((p_a_id, p_a, tour_type))
+                            players_discovered.add((p_b_id, p_b, tour_type))
 
                             c.execute("""
                                 INSERT OR REPLACE INTO Daily_Card (match_id, tournament_id, tour, player_a_id, player_b_id, temp_c, humidity_pct, status, created_at)
                                 VALUES (?, ?, ?, ?, ?, 24.0, 50.0, 'SCHEDULED', ?);
-                            """, (m_id, t_id, tour, p_a_id, p_b_id, now_ts))
+                            """, (m_id, t_id, tour_type, p_a_id, p_b_id, now_ts))
                             matches_queued += 1
         except Exception as e:
-            print(f"[ESPN ERROR] {e}")
+            print(f"[ESPN API] {e}")
 
-    # 2. TennisExplorer (Challengers, Davis Cup, ITF Qualifiers)
-    try:
-        res = requests.get("https://www.tennisexplorer.com/matches/", headers=HEADERS, timeout=12)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            for table in soup.find_all("table", class_="result"):
-                head = table.find("tr", class_="head")
-                if not head:
-                    continue
-
-                raw_t_name = clean_txt(head.get_text(" ", strip=True))
-                if not raw_t_name or len(raw_t_name) < 3:
-                    continue
-
-                nl = raw_t_name.lower()
-                tour_type = "CHALLENGER" if "challenger" in nl else ("DAVIS_CUP" if "davis" in nl else ("WTA" if "wta" in nl else "ITF"))
-                surface = "Clay" if "clay" in nl else ("Grass" if "grass" in nl else "Hard")
-                cpi = 28.0 if surface == "Clay" else 38.0
-
-                t_slug = re.sub(r'[^A-Z0-9_]', '', raw_t_name.upper().replace(' ', '_'))[:30]
-                t_id = f"{tour_type}_{t_slug}"
-                tournaments_discovered[t_id] = (t_id, raw_t_name, tour_type, surface, cpi, 0, 15.0, 3)
-
-                current_pair = []
-                for row in table.find_all("tr"):
-                    if "head" in row.get("class", []):
+    # 2. TennisExplorer Multi-Day Feed
+    for day_offset in [0, 1, 2]:
+        target_date = now + timedelta(days=day_offset)
+        te_url = f"https://www.tennisexplorer.com/matches/?type=all&year={target_date.year}&month={target_date.month}&day={target_date.day}"
+        try:
+            res = requests.get(te_url, headers=HEADERS, timeout=12)
+            if res.status_code == 200:
+                html = res.text
+                tables = re.findall(r'<table[^>]*class="result"[^>]*>(.*?)</table>', html, re.DOTALL)
+                for table in tables:
+                    head_match = re.search(r'<tr[^>]*class="head"[^>]*>(.*?)</tr>', table, re.DOTALL)
+                    raw_t_name = clean_txt(re.sub(r'<[^>]+>', ' ', head_match.group(1))) if head_match else "World Tour"
+                    if not raw_t_name or len(raw_t_name) < 3 or "vs" in raw_t_name.lower():
                         continue
 
-                    # Strictly match athlete profile links; ignore tournament and doubles rows
-                    p_link = row.find("a", href=re.compile(r"^/player/[^/]+/?$"))
-                    if p_link:
-                        td_tname = row.find("td", class_="t-name")
-                        if td_tname and "/" in td_tname.get_text():
-                            current_pair = []  # Drop doubles
+                    t_name, tour_type, surface, cpi = classify_circuit(raw_t_name)
+                    t_slug = re.sub(r'[^A-Z0-9_]', '', t_name.upper().replace(' ', '_'))[:30]
+                    t_id = f"{tour_type}_{t_slug}"
+                    tournaments_discovered[t_id] = (t_id, t_name, tour_type, surface, cpi, 0, 15.0, 3)
+
+                    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table, re.DOTALL)
+                    i = 0
+                    while i < len(rows) - 1:
+                        r1, r2 = rows[i], rows[i+1]
+                        if 't-name' not in r1 or 't-name' not in r2:
+                            i += 1
                             continue
 
-                        p_name = clean_txt(p_link.get_text(strip=True))
-                        if p_name and len(p_name) >= 3:
-                            current_pair.append(p_name)
-                            if len(current_pair) == 2:
-                                p_a, p_b = current_pair
-                                current_pair = []
+                        p1_m = re.search(r'class="t-name"[^>]*>.*?<a[^>]*>(.*?)</a>', r1, re.DOTALL)
+                        p2_m = re.search(r'class="t-name"[^>]*>.*?<a[^>]*>(.*?)</a>', r2, re.DOTALL)
+                        if not p1_m or not p2_m:
+                            i += 1
+                            continue
 
-                                p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
-                                p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
-                                m_id = f"MATCH_{t_slug[:6]}_{p_a_id[:6]}_{p_b_id[:6]}"
+                        p1_title = re.search(r'title="([^"]+)"', r1)
+                        p2_title = re.search(r'title="([^"]+)"', r2)
+                        p_a = clean_txt(p1_title.group(1)) if p1_title else clean_txt(re.sub(r'<[^>]+>', '', p1_m.group(1)))
+                        p_b = clean_txt(p2_title.group(1)) if p2_title else clean_txt(re.sub(r'<[^>]+>', '', p2_m.group(1)))
 
-                                players_discovered.add((p_a_id, p_a, tour_type))
-                                players_discovered.add((p_b_id, p_b, tour_type))
+                        if not p_a or not p_b or "/" in p_a or "/" in p_b or len(p_a) < 3 or len(p_b) < 3:
+                            i += 2
+                            continue
 
-                                c.execute("""
-                                    INSERT OR REPLACE INTO Daily_Card (match_id, tournament_id, tour, player_a_id, player_b_id, temp_c, humidity_pct, status, created_at)
-                                    VALUES (?, ?, ?, ?, ?, 24.0, 50.0, 'SCHEDULED', ?);
-                                """, (m_id, t_id, tour_type, p_a_id, p_b_id, now_ts))
-                                matches_queued += 1
-    except Exception as e:
-        print(f"[TE ERROR] {e}")
+                        p_a_id = f"PRO_{p_a.replace(' ', '_').upper()}"
+                        p_b_id = f"PRO_{p_b.replace(' ', '_').upper()}"
+                        m_id = f"MATCH_{t_slug[:6]}_{p_a_id[:6]}_{p_b_id[:6]}"
+
+                        players_discovered.add((p_a_id, p_a, tour_type))
+                        players_discovered.add((p_b_id, p_b, tour_type))
+
+                        c.execute("""
+                            INSERT OR REPLACE INTO Daily_Card (match_id, tournament_id, tour, player_a_id, player_b_id, temp_c, humidity_pct, status, created_at)
+                            VALUES (?, ?, ?, ?, ?, 24.0, 50.0, 'SCHEDULED', ?);
+                        """, (m_id, t_id, tour_type, p_a_id, p_b_id, now_ts))
+                        matches_queued += 1
+                        i += 2
+        except Exception as e:
+            print(f"[CALENDAR ERROR] {e}")
 
     for t_data in tournaments_discovered.values():
         c.execute("""
-            INSERT OR REPLACE INTO Tournaments (id, name, tour, surface, cpi, is_indoor, elevation_m, best_of)
+            INSERT OR REPLACE INTO Tournaments 
+            (id, name, tour, surface, cpi, is_indoor, elevation_m, best_of)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """, t_data)
 
     for p_id, p_name, p_tour in players_discovered:
         c.execute("""
-            INSERT OR IGNORE INTO Players (id, name, tour, handedness, backhand, serve_p, return_q, bp_save, bp_convert, topspin_rpm, sample_points, fatigue_hours_72h, rest_days, updated_at)
+            INSERT OR IGNORE INTO Players 
+            (id, name, tour, handedness, backhand, serve_p, return_q, bp_save, bp_convert, topspin_rpm, sample_points, fatigue_hours_72h, rest_days, updated_at)
             VALUES (?, ?, ?, 'R', '2H', 0.640, 0.360, 0.600, 0.400, 2700, 100, 0.0, 3, ?);
         """, (p_id, p_name, p_tour, now_ts))
 
     conn.commit()
     conn.close()
-    print(f"[SUCCESS] Cataloged {len(tournaments_discovered)} tournaments and queued {matches_queued} clean singles matches.")
+    print(f"[SUCCESS] Ingested {len(tournaments_discovered)} clean tournaments and {matches_queued} matchups.")
 
 if __name__ == "__main__":
-    sync_active_tournaments()
+    sync_worldwide_slate()

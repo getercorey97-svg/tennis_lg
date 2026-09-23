@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Autonomous Multi-Tour Operations Hub & Scientific Accuracy Proof
-- Automated Background Loop: post_mortem -> scraper -> run_pipeline
-- Factual Post-Mortem Audit & Gradient Descent Parameter Learning
-- Mathematical Proof of Accuracy: ECE, Brier Skill Score, Z-Score
-- Mobile-First Quantitative UI with Kelly Criterion Staking
+tennis_lg: High-Visibility Quantitative Tennis Prediction Hub
+- Distinct PROJECTED WINNER badge on every card
+- Explicit Outright, Spread, and Game Totals recommendations
+- Dead-heat detection for even 50/50 matchups
+- Fractional Kelly stake sizing and Geter Principle vectors
 """
 
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -28,7 +28,7 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-def calculate_ev_and_kelly(prob: float, american_odds: int, bankroll: float = 1000.0, kelly_fraction: float = 0.25):
+def calculate_ev_and_kelly(prob: float, american_odds: int, kelly_fraction: float = 0.25):
     if american_odds > 0:
         b = american_odds / 100.0
     else:
@@ -127,21 +127,17 @@ def execute_pipeline_refresh():
         return
     LAST_RUN = now
     try:
-        # STRICT LIFECYCLE SEQUENCE:
-        # 1. Audit finished matches and learn parameter gradients FIRST
         subprocess.run(["python3", "post_mortem.py"], check=False)
-        # 2. Ingest worldwide active/upcoming matches
         subprocess.run(["python3", "scraper.py"], check=False)
-        # 3. Project new unforecasted matches and lock them
         subprocess.run(["python3", "run_pipeline.py"], check=False)
     except Exception as e:
-        print(f"[PIPELINE SYNC ERROR] {e}")
+        print(f"[PIPELINE ERROR] {e}")
 
 async def background_loop():
     await asyncio.sleep(5)
     while True:
         execute_pipeline_refresh()
-        await asyncio.sleep(900)  # Every 15 minutes
+        await asyncio.sleep(900)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -178,7 +174,6 @@ def dashboard():
     conn = get_db()
     c = conn.cursor()
 
-    # 1. Active Forecasts
     c.execute("""
         SELECT f.*, COALESCE(t.name, f.tournament_id) as tourney_name, COALESCE(t.surface, 'Hard') as tourney_surface
         FROM Model_Forecasts f
@@ -190,26 +185,38 @@ def dashboard():
     forecasts = []
     grouped_matches = defaultdict(list)
     for f in raw_forecasts:
-        is_a_fav = f['prob_a_win'] >= f['prob_b_win']
+        p_a = f['prob_a_win']
+        p_b = f['prob_b_win']
+        
+        # Dead-heat check (0.495 to 0.505)
+        is_dead_heat = abs(p_a - 0.5) <= 0.005
+        is_a_fav = p_a >= p_b
+        
         fav = f['player_a'] if is_a_fav else f['player_b']
         und = f['player_b'] if is_a_fav else f['player_a']
-        fav_prob = max(f['prob_a_win'], f['prob_b_win'])
+        fav_prob = max(p_a, p_b)
+        und_prob = min(p_a, p_b)
+        
         fav_ml = f['american_ml_a'] if is_a_fav else f['american_ml_b']
         ev_pct, kelly_units = calculate_ev_and_kelly(fav_prob, fav_ml)
 
         match_data = {
             **f,
+            'is_dead_heat': is_dead_heat,
             'fav': fav,
             'und': und,
             'fav_prob_pct': round(fav_prob * 100, 1),
+            'und_prob_pct': round(und_prob * 100, 1),
             'fav_ml_str': f"+{fav_ml}" if fav_ml > 0 else str(fav_ml),
+            'spread_pick': f"{fav} {f['proj_game_spread']:+.1f}g",
+            'totals_pick': f"{f['proj_total_games']} Games",
             'ev_pct': ev_pct,
             'kelly_units': kelly_units
         }
         forecasts.append(match_data)
         grouped_matches[(f['tourney_name'], f['tour'], f['tourney_surface'])].append(match_data)
 
-    # 2. Active Tournaments
+    # Active Tournaments
     c.execute("""
         SELECT t.id, t.name, t.tour, t.surface, COUNT(d.match_id) as match_count
         FROM Tournaments t
@@ -219,14 +226,13 @@ def dashboard():
     """)
     active_tourneys = [dict(row) for row in c.fetchall()]
 
-    # 3. Model Weights & Learning Logs
+    # Model Weights & Learning Logs
     c.execute("SELECT * FROM Feature_Correlations;")
     betas = {row['vector_name']: row['beta_weight'] for row in c.fetchall()}
-    
     c.execute("SELECT * FROM Learning_Log ORDER BY id DESC LIMIT 50;")
     learning_events = [dict(row) for row in c.fetchall()]
 
-    # 4. Factual Audits & Rigorous Accuracy Proof Metrics
+    # Factual Audits Ledger
     c.execute("SELECT * FROM Historical_Forecasts WHERE player_a NOT LIKE 'Player_%' ORDER BY evaluated_at DESC LIMIT 1500;")
     raw_audits = [dict(row) for row in c.fetchall()]
     audits = []
@@ -244,7 +250,7 @@ def dashboard():
     mean_brier = round(total_brier / audit_total, 4) if audit_total > 0 else 0.0
     proof = compute_calibration_proof(audits)
 
-    # 5. Betting Ledger
+    # Betting Ledger
     c.execute("SELECT * FROM Betting_Logs ORDER BY logged_at DESC;")
     bets = [dict(row) for row in c.fetchall()]
     net_units = round(sum(b['payout_units'] for b in bets if b['status'] in ('WON', 'LOST')), 2)
@@ -311,8 +317,21 @@ def dashboard():
             .tourney-title {{ font-size: 0.88rem; font-weight: 800; color: #fff; }}
             .tourney-meta {{ font-size: 0.7rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }}
 
+            /* Prediction Callout Box */
+            .prediction-badge {{
+                display: flex; justify-content: space-between; align-items: center;
+                background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(6, 182, 212, 0.15));
+                border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 10px;
+                padding: 10px 12px; margin: 10px 0;
+            }}
+            .prediction-badge.toss-up {{
+                background: rgba(142, 142, 147, 0.15); border-color: rgba(142, 142, 147, 0.3);
+            }}
+            .pred-label {{ font-size: 0.68rem; font-weight: 800; color: var(--accent-cyan); text-transform: uppercase; letter-spacing: 0.5px; }}
+            .pred-pick {{ font-size: 0.95rem; font-weight: 800; color: #fff; }}
+
             .match-card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 14px; margin-bottom: 12px; }}
-            .card-top {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
+            .card-top {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }}
             .tour-pill {{ background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); font-size: 0.65rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; }}
             
             .prob-split {{ display: flex; justify-content: space-between; font-size: 0.82rem; font-weight: 700; margin-bottom: 6px; }}
@@ -387,7 +406,7 @@ def dashboard():
                 <div class="brand-title">tennis_lg // Quant Engine</div>
                 <div class="brand-sub">
                     <span class="status-dot"></span>
-                    <span>Autonomous Self-Learning Execution Loop</span>
+                    <span>High-Precision Autonomous Pipeline</span>
                 </div>
             </div>
             <div style="text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-muted);">
@@ -450,12 +469,31 @@ def dashboard():
         """
         for m_idx, m in enumerate(matches):
             card_id = f"{idx}_{m_idx}"
+            
+            # Render Dedicated Prediction Callout Banner
+            if m['is_dead_heat']:
+                pred_banner = """
+                <div class="prediction-badge toss-up">
+                    <span class="pred-label" style="color: var(--text-muted);">MODEL PREDICTION</span>
+                    <span class="pred-pick" style="color: var(--text-muted);">⚖️ 50/50 Even Dead Heat (No Edge - Pass)</span>
+                </div>
+                """
+            else:
+                pred_banner = f"""
+                <div class="prediction-badge">
+                    <span class="pred-label">🏆 PROJECTED WINNER</span>
+                    <span class="pred-pick">{m['fav']} <span style="color: var(--accent-green); font-family: 'JetBrains Mono', monospace;">({m['fav_prob_pct']}%)</span></span>
+                </div>
+                """
+
             html += f"""
             <div class="match-card" data-search="{t_name} {m['tour']} {m['player_a']} {m['player_b']}">
                 <div class="card-top">
                     <span style="font-size: 0.95rem; font-weight: 800;">{m['player_a']} vs {m['player_b']}</span>
                     <span class="tour-pill">{m['tour']}</span>
                 </div>
+
+                {pred_banner}
 
                 <div class="prob-split">
                     <span style="color: var(--accent-cyan);">{m['player_a']} ({round(m['prob_a_win']*100, 1)}%)</span>
@@ -472,12 +510,12 @@ def dashboard():
                         <div class="stat-val">{m['fav_ml_str']}</div>
                     </div>
                     <div class="stat-cell">
-                        <div class="stat-lbl">Proj Spread</div>
-                        <div class="stat-val">{m['proj_game_spread']:+.1f}g</div>
+                        <div class="stat-lbl">Spread Pick</div>
+                        <div class="stat-val" style="font-size: 0.78rem;">{m['spread_pick']}</div>
                     </div>
                     <div class="stat-cell">
                         <div class="stat-lbl">Total Games</div>
-                        <div class="stat-val">{m['proj_total_games']}</div>
+                        <div class="stat-val">{m['totals_pick']}</div>
                     </div>
                 </div>
 
