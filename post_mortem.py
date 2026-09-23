@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Autonomous Factual Post-Mortem & Parameter Learning Engine
-- Strictly simulation-free: Compares pre-match locked forecasts against empirical line scores
+tennis_lg: Autonomous Factual Auditor & Lifelong Player Learning Engine
 - Scrapes completed matches across ATP, WTA, Challengers, ITF, and Davis Cup
-- Evaluates Brier score, actual game totals, and spreads
-- Executes gradient descent parameter optimization on feature correlation weights (beta)
-- Auto-settles wagers and records learning logs
+- Evaluates simulation-free Brier scores and auto-settles wagers
+- Performs Bayesian updating on individual player ratings (serve_p, return_q, sample_points)
+- Executes gradient descent on Geter Principle correlation weights (beta)
+- Saves updated player intelligence into SQLite for future match projections
 """
 
 import sqlite3
@@ -39,11 +39,11 @@ def audit_and_learn():
         conn.close()
         return
 
-    print(f"[POST-MORTEM] Checking outcomes for {len(active_forecasts)} pending fixtures...")
+    print(f"[POST-MORTEM] Checking official results for {len(active_forecasts)} pending fixtures...")
 
     completed_results = []
 
-    # 1. Ingest Official ESPN Completed Scores (ATP & WTA)
+    # 1. Scrape ESPN Completed Scores
     for tour, url in ESPN_ENDPOINTS.items():
         try:
             res = requests.get(url, headers=HEADERS, timeout=8)
@@ -65,7 +65,7 @@ def audit_and_learn():
         except Exception as e:
             print(f"[POST-MORTEM ESPN] {e}")
 
-    # 2. Ingest TennisExplorer Multi-Tour Completed Matches (Challengers, ITF, Davis Cup, WTA, ATP)
+    # 2. Scrape TennisExplorer Completed Matches
     try:
         url = "https://www.tennisexplorer.com/matches/?type=all"
         res = requests.get(url, headers=HEADERS, timeout=12)
@@ -109,9 +109,8 @@ def audit_and_learn():
     except Exception as e:
         print(f"[POST-MORTEM TE] {e}")
 
-    print(f"[POST-MORTEM] Scraped {len(completed_results)} official completed outcomes.")
+    print(f"[POST-MORTEM] Scraped {len(completed_results)} completed match outcomes.")
 
-    # 3. Simulation-Free Comparison, Parameter Learning & Wager Settlement
     c.execute("SELECT vector_name, beta_weight FROM Feature_Correlations;")
     betas = {r[0]: r[1] for r in c.fetchall()}
     audited = 0
@@ -126,12 +125,12 @@ def audit_and_learn():
 
             if (f1_norm in r1_norm or r1_norm in f1_norm) and (f2_norm in r2_norm or r2_norm in f2_norm):
                 actual_winner = f['player_a'] if normalize(res['winner']) == f1_norm else f['player_b']
+                actual_loser = f['player_b'] if actual_winner == f['player_a'] else f['player_a']
                 y_a = 1.0 if actual_winner == f['player_a'] else 0.0
 
-                # Empirical Brier score
                 brier = round((f['prob_a_win'] - y_a) ** 2, 4)
 
-                # Record in Historical_Forecasts validation ledger
+                # 1. Record in validation ledger
                 c.execute("""
                     INSERT OR REPLACE INTO Historical_Forecasts (
                         match_id, tournament_id, tour, player_a, player_b,
@@ -144,7 +143,7 @@ def audit_and_learn():
                     res['spread'], brier, now_ts
                 ))
 
-                # Auto-settle active wagers
+                # 2. Settle wagers
                 c.execute("SELECT id, selection, odds, units FROM Betting_Logs WHERE match_id = ? AND status = 'PENDING';", (f['match_id'],))
                 for b_id, sel, odds, units in c.fetchall():
                     if sel == actual_winner:
@@ -153,30 +152,58 @@ def audit_and_learn():
                     else:
                         c.execute("UPDATE Betting_Logs SET status = 'LOST', actual_winner = ?, payout_units = ? WHERE id = ?;", (actual_winner, -units, b_id))
 
-                # Gradient Descent Optimization on Geter Principle Correlation Weights
-                # Error gradient: err = actual (y_a) - predicted (prob_a_win)
+                # 3. Dynamic Player Learning: Update Career Ratings in SQLite
+                # Estimate points played based on total games (~6.2 points per game)
+                match_pts = max(60, int(res['total_games'] * 6.2))
+                
+                # Fetch existing player profiles
+                for p_name, is_winner in [(actual_winner, True), (actual_loser, False)]:
+                    c.execute("SELECT id, serve_p, return_q, sample_points FROM Players WHERE name = ? COLLATE NOCASE;", (p_name,))
+                    p_row = c.fetchone()
+                    if p_row:
+                        p_id, old_sp, old_rq, old_pts = p_row[0], p_row[1], p_row[2], p_row[3]
+                        # Winner gained performance edge; loser surrendered return edge
+                        match_sp = 0.675 if is_winner else 0.595
+                        match_rq = 0.405 if is_winner else 0.325
+
+                        new_pts = old_pts + match_pts
+                        new_sp = round((old_sp * old_pts + match_sp * match_pts) / new_pts, 4)
+                        new_rq = round((old_rq * old_pts + match_rq * match_pts) / new_pts, 4)
+
+                        c.execute("""
+                            UPDATE Players 
+                            SET serve_p = ?, return_q = ?, sample_points = ?, updated_at = ?
+                            WHERE id = ?;
+                        """, (new_sp, new_rq, new_pts, now_ts, p_id))
+                    else:
+                        # Register newly encountered player with empirical baseline + match data
+                        new_id = f"PRO_{p_name.replace(' ', '_').upper()}"
+                        init_sp = 0.660 if is_winner else 0.620
+                        init_rq = 0.380 if is_winner else 0.340
+                        c.execute("""
+                            INSERT INTO Players (id, name, tour, handedness, backhand, serve_p, return_q, bp_save, bp_convert, topspin_rpm, sample_points, fatigue_hours_72h, rest_days, updated_at)
+                            VALUES (?, ?, ?, 'R', '2H', ?, ?, 0.600, 0.400, 2700, ?, 0.0, 3, ?);
+                        """, (new_id, p_name, f['tour'], init_sp, init_rq, match_pts, now_ts))
+
+                # 4. Model Parameter Learning: Gradient Descent on Geter Betas
                 err = y_a - f['prob_a_win']
-                lr = 0.005  # Learning rate
+                lr = 0.005
                 vectors = [
-                    ('v_physics', f['v_physics']),
-                    ('v_thermo', f['v_thermo']),
-                    ('v_bio', f['v_bio']),
-                    ('v_variance', f['v_variance'])
+                    ('v_physics', f['v_physics']), ('v_thermo', f['v_thermo']),
+                    ('v_bio', f['v_bio']), ('v_variance', f['v_variance'])
                 ]
-
                 for v_name, v_val in vectors:
-                    old_beta = betas.get(v_name, 1.0)
+                    old_b = betas.get(v_name, 1.0)
                     delta = lr * err * (v_val if v_val != 0 else 0.5)
-                    new_beta = round(max(0.5, min(2.0, old_beta + delta)), 4)
-                    betas[v_name] = new_beta
-
-                    c.execute("UPDATE Feature_Correlations SET beta_weight = ?, updated_at = ? WHERE vector_name = ?;", (new_beta, now_ts, v_name))
+                    new_b = round(max(0.5, min(2.0, old_b + delta)), 4)
+                    betas[v_name] = new_b
+                    c.execute("UPDATE Feature_Correlations SET beta_weight = ?, updated_at = ? WHERE vector_name = ?;", (new_b, now_ts, v_name))
                     c.execute("""
                         INSERT INTO Learning_Log (parameter, old_val, new_val, delta, reason, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?);
-                    """, (v_name, old_beta, new_beta, round(delta, 4), f"Audit error ({err:+.3f}) on {f['player_a']} vs {f['player_b']}", now_ts))
+                    """, (v_name, old_b, new_b, round(delta, 4), f"Factual error ({err:+.3f}) on {f['player_a']} vs {f['player_b']}", now_ts))
 
-                # Remove evaluated match from active queues
+                # 5. Clear completed match from active queues
                 c.execute("DELETE FROM Daily_Card WHERE match_id = ?;", (f['match_id'],))
                 c.execute("DELETE FROM Model_Forecasts WHERE match_id = ?;", (f['match_id'],))
                 audited += 1
@@ -184,7 +211,7 @@ def audit_and_learn():
 
     conn.commit()
     conn.close()
-    print(f"[POST-MORTEM COMPLETE] Audited {audited} finished matches. Model weights calibrated.")
+    print(f"[POST-MORTEM SUCCESS] Audited {audited} matches. Individual player ratings updated in database.")
 
 if __name__ == "__main__":
     audit_and_learn()
