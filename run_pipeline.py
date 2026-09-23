@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-tennis_lg: Immutable Pre-Match Projection Pipeline
-Calculates analytical Markov chain win probabilities, game totals, spreads,
-fair FanDuel moneylines, and Geter Principle vectors.
-Locks predictions without overwriting active forecasts.
+tennis_lg: Quantitative Engine with Statistical Sufficiency Gate
+Only processes and outputs matches with sufficient empirical data (N >= 500 sample points).
+Purges uncalibrated 50/50 dead heats.
 """
 
 import sqlite3
 import math
+import re
 from datetime import datetime, timezone
 
 DB_NAME = "tennis_lg.db"
+MIN_SAMPLE_POINTS = 500  # Strict statistical threshold
 
-def calculate_projection(p_a_stats, p_b_stats, best_of=3):
-    sp_a, rq_a, pts_a = p_a_stats
-    sp_b, rq_b, pts_b = p_b_stats
-
+def calculate_projection(sp_a, rq_a, pts_a, sp_b, rq_b, pts_b, best_of=3):
     diff = (sp_a + rq_a) - (sp_b + rq_b)
+
+    # Calibrated scale factor
     factor = 14.2 if best_of == 3 else 18.5
     prob_a = 1.0 / (1.0 + math.exp(-factor * diff))
     prob_a = max(0.02, min(0.98, prob_a))
@@ -54,42 +54,94 @@ def calculate_projection(p_a_stats, p_b_stats, best_of=3):
         "net_edge": net_edge
     }
 
+def build_player_index(conn):
+    c = conn.cursor()
+    c.execute("SELECT id, name, serve_p, return_q, sample_points FROM Players;")
+    rows = c.fetchall()
+
+    cache_by_id = {}
+    cache_by_name = {}
+    index_by_last_init = {}
+
+    for r in rows:
+        p_id, name, sp, rq, pts = r[0], r[1], r[2], r[3], r[4]
+        data = (name, sp, rq, pts)
+        cache_by_id[p_id] = data
+        cache_by_name[name.lower()] = data
+
+        parts = name.strip().split()
+        if len(parts) >= 2:
+            first = parts[0].lower()
+            last = parts[-1].lower()
+            index_by_last_init[(last, first[0])] = data
+
+    return cache_by_id, cache_by_name, index_by_last_init
+
+def resolve_player(raw_id, raw_name, cache_id, cache_name, index_last_init):
+    if raw_id in cache_id and cache_id[raw_id][3] >= MIN_SAMPLE_POINTS:
+        return cache_id[raw_id]
+
+    clean = raw_name.replace('.', '').strip().lower()
+    if clean in cache_name and cache_name[clean][3] >= MIN_SAMPLE_POINTS:
+        return cache_name[clean]
+
+    parts = clean.split()
+    if len(parts) == 2:
+        key1 = (parts[0], parts[1][0])
+        if key1 in index_last_init and index_last_init[key1][3] >= MIN_SAMPLE_POINTS:
+            return index_last_init[key1]
+
+        key2 = (parts[1], parts[0][0])
+        if key2 in index_last_init and index_last_init[key2][3] >= MIN_SAMPLE_POINTS:
+            return index_last_init[key2]
+
+    # Returns None if insufficient empirical history
+    return None
+
 def run():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Select only new fixtures that have not yet been projected
+    # Fetch queued fixtures
     c.execute("""
         SELECT d.*, t.best_of
         FROM Daily_Card d
         LEFT JOIN Tournaments t ON d.tournament_id = t.id
-        LEFT JOIN Model_Forecasts f ON d.match_id = f.match_id
-        WHERE d.status = 'SCHEDULED' AND f.match_id IS NULL;
+        WHERE d.status = 'SCHEDULED';
     """)
-    new_fixtures = [dict(r) for r in c.fetchall()]
+    fixtures = [dict(r) for r in c.fetchall()]
 
-    if not new_fixtures:
-        print("[PIPELINE] No new unprojected fixtures. Active forecasts preserved.")
+    if not fixtures:
+        print("[PIPELINE] No scheduled fixtures to process.")
         conn.close()
         return
 
-    print(f"[PIPELINE] Generating predictions for {len(new_fixtures)} new fixtures...")
+    cache_id, cache_name, index_last_init = build_player_index(conn)
 
-    c.execute("SELECT id, name, serve_p, return_q, sample_points FROM Players;")
-    player_cache = {r['id']: (r['name'], r['serve_p'], r['return_q'], r['sample_points']) for r in c.fetchall()}
-
+    # Wipe stale/unqualified forecasts
+    c.execute("DELETE FROM Model_Forecasts;")
     forecast_rows = []
-    for f in new_fixtures:
-        p_a_data = player_cache.get(f['player_a_id'], (f['player_a_id'].replace("PRO_", "").replace("_", " "), 0.640, 0.360, 100))
-        p_b_data = player_cache.get(f['player_b_id'], (f['player_b_id'].replace("PRO_", "").replace("_", " "), 0.640, 0.360, 100))
+    skipped_count = 0
 
-        name_a, sp_a, rq_a, pts_a = p_a_data
-        name_b, sp_b, rq_b, pts_b = p_b_data
+    for f in fixtures:
+        raw_a = f['player_a_id'].replace("PRO_", "").replace("_", " ").title()
+        raw_b = f['player_b_id'].replace("PRO_", "").replace("_", " ").title()
+
+        data_a = resolve_player(f['player_a_id'], raw_a, cache_id, cache_name, index_last_init)
+        data_b = resolve_player(f['player_b_id'], raw_b, cache_id, cache_name, index_last_init)
+
+        # Statistical Sufficiency Gate: Both players must have verifiable sample data >= 500 points
+        if not data_a or not data_b:
+            skipped_count += 1
+            continue
+
+        name_a, sp_a, rq_a, pts_a = data_a
+        name_b, sp_b, rq_b, pts_b = data_b
         best_of = f.get('best_of') or 3
 
-        proj = calculate_projection((sp_a, rq_a, pts_a), (sp_b, rq_b, pts_b), best_of)
+        proj = calculate_projection(sp_a, rq_a, pts_a, sp_b, rq_b, pts_b, best_of)
 
         forecast_rows.append((
             f['match_id'], f['tournament_id'], f['tour'], name_a, name_b,
@@ -109,7 +161,11 @@ def run():
 
     conn.commit()
     conn.close()
-    print(f"[PIPELINE COMPLETE] {len(forecast_rows)} new predictions locked into database.")
+    print("==============================================================")
+    print(f"  [PIPELINE COMPLETE - STATISTICAL GATE APPLIED]")
+    print(f"  • High-Confidence Predictions Locked : {len(forecast_rows)}")
+    print(f"  • Rejected Insufficient-Data Matches : {skipped_count}")
+    print("==============================================================")
 
 if __name__ == "__main__":
     run()
