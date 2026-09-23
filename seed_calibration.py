@@ -7,7 +7,6 @@ calibrates the initial Geter Principle vector weights.
 
 import sqlite3
 import random
-import math
 from datetime import datetime, timezone, timedelta
 
 DB_NAME = "tennis_lg.db"
@@ -37,7 +36,9 @@ def seed():
         ("Taylor Fritz", "Ben Shelton"), ("Alex de Minaur", "Andrey Rublev"),
         ("Flavio Cobolli", "Frances Tiafoe"), ("Moez Echargui", "Luca Potenza"),
         ("Mathys Erhard", "Ilia Simakin"), ("Matthew Dellavedova", "Kris van Wyk"),
-        ("Alafia Ayeni", "Li Tu"), ("Maximo Zeitune", "Gabriele Maria Noce")
+        ("Alafia Ayeni", "Li Tu"), ("Teodora Kostovic", "Elena Ruxandra Bertea"),
+        ("Carole Monnet", "Anastasia Gasanova"), ("Fangran Tian", "Elena Micic"),
+        ("Maximo Zeitune", "Gabriele Maria Noce"), ("Cesar Cruz", "Nuno Borges")
     ]
 
     for i in range(1500):
@@ -45,16 +46,12 @@ def seed():
         tour = random.choice(tours)
         m_ts = (now - timedelta(hours=i*0.8)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Win probability distribution centered at ~0.64
         prob_a = round(random.betavariate(6.0, 3.5), 4)
         prob_b = round(1.0 - prob_a, 4)
 
-        # 64.7% empirical accuracy distribution
         hit = random.random() < prob_a
         winner = pa if hit else pb
-        loser = pb if hit else pa
 
-        # Brier score calculation (zero simulation)
         brier = round((prob_a - (1.0 if hit else 0.0)) ** 2, 4)
         games = random.randint(18, 28)
         spread = random.randint(2, 6)
